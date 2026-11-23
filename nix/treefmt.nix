@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: 2026 Iain Lane <iain@orangesquash.org.uk>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+{inputs, ...}: {
+  imports = [inputs.treefmt-nix.flakeModule];
+
+  perSystem = {
+    config,
+    pkgs,
+    ...
+  }: let
+    inherit (pkgs) lib;
+  in {
+    treefmt.config = {
+      programs = {
+        actionlint.enable = true;
+        alejandra.enable = true;
+        deadnix.enable = true;
+        mdformat.enable = false;
+        nixf-diagnose = {
+          enable = true;
+          variableLookup = true;
+        };
+        prettier = {
+          enable = true;
+          settings.proseWrap = "always";
+        };
+        rustfmt = {
+          enable = true;
+          package = config.dp2.rustfmtNightly;
+        };
+        statix.enable = true;
+        zizmor.enable = true;
+      };
+
+      projectRootFile = "flake.nix";
+
+      settings.formatter = {
+        zizmor.options = ["--persona" "pedantic"];
+
+        markdownlint = {
+          command = lib.getExe pkgs.markdownlint-cli2;
+          options = ["--fix" "--"];
+          includes = ["*.md"];
+        };
+      };
+    };
+  };
+}

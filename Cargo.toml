@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: 2026 Iain Lane <iain@orangesquash.org.uk>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.metadata.crane]
+name = "dp2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/underwhelmingperformance/dp2"
+readme = "README.md"
+keywords = ["pipewire", "depth", "depth-pro-2", "varlink", "video"]
+categories = ["multimedia::video", "os::linux-apis"]
+publish = false
+
+[workspace.dependencies]
+assert_matches = "1.5.0"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+crossbeam-channel = "0.5.15"
+derive_more = { version = "2.1.1", features = ["display", "from", "into"] }
+dp2-core = { path = "crates/dp2-core" }
+dp2-depth = { path = "crates/dp2-depth" }
+dp2-pipewire = { path = "crates/dp2-pipewire" }
+dp2-varlink = { path = "crates/dp2-varlink" }
+futures-util = "0.3.32"
+half = "2.7.1"
+ndarray = "0.17.2"
+ort = { version = "2.0.0-rc.15", default-features = false, features = [
+  "api-22",
+  "half",
+  "load-dynamic",
+  "ndarray",
+  "std",
+  "tracing",
+] }
+pipewire = "0.10.1"
+pretty_assertions = "1.4.1"
+rstest = "0.27.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.149"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = { version = "1.51.1", features = [
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = [
+  "ansi",
+  "env-filter",
+  "fmt",
+  "json",
+  "std",
+] }
+zlink = { version = "0.9.1", default-features = false, features = [
+  "proxy",
+  "service",
+  "tokio",
+  "tracing",
+] }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+cognitive_complexity = "warn"
+dbg_macro = "warn"
+multiple_crate_versions = "allow"
+print_stderr = "warn"
+print_stdout = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+unimplemented = "warn"
+unwrap_used = "warn"

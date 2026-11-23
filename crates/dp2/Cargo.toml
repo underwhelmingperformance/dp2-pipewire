@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: 2026 Iain Lane <iain@orangesquash.org.uk>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "dp2"
+description = "PipeWire virtual camera daemon powered by Depth Pro 2 and Varlink"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+clap.workspace = true
+dp2-core.workspace = true
+dp2-depth.workspace = true
+dp2-pipewire.workspace = true
+dp2-varlink.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+assert_matches.workspace = true
+dp2-core = { workspace = true, features = ["testing"] }
+pretty_assertions.workspace = true
+rstest.workspace = true
+tempfile.workspace = true
