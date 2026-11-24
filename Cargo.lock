@@ -322,6 +322,7 @@ dependencies = [
  "dp2-varlink",
  "pretty_assertions",
  "rstest",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

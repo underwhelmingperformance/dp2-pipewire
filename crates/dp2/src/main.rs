@@ -4,4 +4,8 @@
 
 //! Entry point for the `dp2` binary.
 
-fn main() {}
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    dp2::entry()
+}

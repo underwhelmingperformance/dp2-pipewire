@@ -24,6 +24,7 @@ dp2-core.workspace = true
 dp2-depth.workspace = true
 dp2-pipewire.workspace = true
 dp2-varlink.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
