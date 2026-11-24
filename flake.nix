@@ -42,9 +42,11 @@
         ./nix/checks.nix
         ./nix/devshell.nix
         ./nix/git-hooks.nix
+        ./nix/modules.nix
         ./nix/packages.nix
         ./nix/reuse.nix
         ./nix/treefmt.nix
+        ./nix/vm-tests.nix
       ];
 
       systems = [

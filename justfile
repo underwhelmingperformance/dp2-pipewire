@@ -26,11 +26,14 @@ audit:
 reuse:
     reuse lint
 
-vm-setup:
-    scripts/vm-setup
-
 vm-test:
-    scripts/vm-test
+    nix build --no-link --print-build-logs .#checks.x86_64-linux.vm-pipeline .#checks.x86_64-linux.vm-gnome-extension
+
+vm-test-pipeline:
+    nix build --no-link --print-build-logs .#checks.x86_64-linux.vm-pipeline
+
+vm-test-gnome:
+    nix build --no-link --print-build-logs .#checks.x86_64-linux.vm-gnome-extension
 
 check: clippy test doc deny audit reuse
     nix flake check
