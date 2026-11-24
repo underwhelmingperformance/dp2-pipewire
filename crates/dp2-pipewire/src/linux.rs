@@ -90,7 +90,7 @@ impl PipeWireVideoSource {
         let worker = thread::Builder::new()
             .name("dp2-pw-source".into())
             .spawn(move || {
-                run_source_loop(&config, frames_tx, frames_rx_evict, ready_tx, cmd_rx);
+                run_source_loop(&config, frames_tx, frames_rx_evict, &ready_tx, cmd_rx);
             })
             .map_err(|e| PipeWireError::Stream(format!("failed to spawn PipeWire thread: {e}")))?;
 
@@ -142,141 +142,145 @@ fn run_source_loop(
     config: &PipeWireSourceConfig,
     frames_tx: Sender<Result<VideoFrame, PipeWireError>>,
     frames_rx_evict: Receiver<Result<VideoFrame, PipeWireError>>,
-    ready_tx: Sender<Result<(), PipeWireError>>,
+    ready_tx: &Sender<Result<(), PipeWireError>>,
     cmd_rx: pw::channel::Receiver<SourceCmd>,
 ) {
+    if let Err(err) = run_source_loop_inner(config, frames_tx, frames_rx_evict, ready_tx, cmd_rx) {
+        let _ = ready_tx.send(Err(err));
+    }
+}
+
+fn run_source_loop_inner(
+    config: &PipeWireSourceConfig,
+    frames_tx: Sender<Result<VideoFrame, PipeWireError>>,
+    frames_rx_evict: Receiver<Result<VideoFrame, PipeWireError>>,
+    ready_tx: &Sender<Result<(), PipeWireError>>,
+    cmd_rx: pw::channel::Receiver<SourceCmd>,
+) -> Result<(), PipeWireError> {
     pw::init();
 
-    let setup = (|| -> Result<_, PipeWireError> {
-        let mainloop = pw::main_loop::MainLoopRc::new(None)
-            .map_err(|e| PipeWireError::Connect(e.to_string()))?;
-        let context = pw::context::ContextRc::new(&mainloop, None)
-            .map_err(|e| PipeWireError::Connect(e.to_string()))?;
-        let core = connect_core(&context, config.remote_name.as_deref())?;
+    let mainloop =
+        pw::main_loop::MainLoopRc::new(None).map_err(|e| PipeWireError::Connect(e.to_string()))?;
+    let context = pw::context::ContextRc::new(&mainloop, None)
+        .map_err(|e| PipeWireError::Connect(e.to_string()))?;
+    let core = connect_core(&context, config.remote_name.as_deref())?;
 
-        let mut props = PropertiesBox::new();
-        props.insert(*pw::keys::MEDIA_TYPE, "Video");
-        props.insert(*pw::keys::MEDIA_CATEGORY, "Capture");
-        props.insert(*pw::keys::MEDIA_ROLE, "Camera");
-        if let Some(ref target) = config.target {
-            props.insert(*pw::keys::TARGET_OBJECT, target.as_str());
-        }
+    let mut props = PropertiesBox::new();
+    props.insert(*pw::keys::MEDIA_TYPE, "Video");
+    props.insert(*pw::keys::MEDIA_CATEGORY, "Capture");
+    props.insert(*pw::keys::MEDIA_ROLE, "Camera");
+    if let Some(ref target) = config.target {
+        props.insert(*pw::keys::TARGET_OBJECT, target.as_str());
+    }
 
-        let stream = pw::stream::StreamBox::new(&core, &config.stream_name, props)
-            .map_err(|e| PipeWireError::Stream(e.to_string()))?;
+    let stream = pw::stream::StreamRc::new(core.clone(), &config.stream_name, props)
+        .map_err(|e| PipeWireError::Stream(e.to_string()))?;
 
-        let user_data = CaptureUserData {
-            format: VideoInfoRaw::default(),
-            format_ready: false,
-            sequence: 0,
-            frames_tx: frames_tx.clone(),
-            frames_rx_drop: frames_rx_evict,
-        };
+    let user_data = CaptureUserData {
+        format: VideoInfoRaw::default(),
+        format_ready: false,
+        sequence: 0,
+        frames_tx,
+        frames_rx_drop: frames_rx_evict,
+    };
 
-        let listener = stream
-            .add_local_listener_with_user_data(user_data)
-            .state_changed(|_, _, old, new| {
-                debug!(?old, ?new, "PipeWire capture stream state changed");
-            })
-            .param_changed(|_, data, id, param| {
-                let Some(param) = param else {
-                    return;
-                };
-                if id != ParamType::Format.as_raw() {
-                    return;
-                }
-                let Ok((media_type, media_subtype)) = parse_format(param) else {
-                    return;
-                };
-                if media_type != MediaType::Video || media_subtype != MediaSubtype::Raw {
-                    return;
-                }
-                if data.format.parse(param).is_ok() {
-                    data.format_ready = true;
-                    let size = data.format.size();
-                    info!(
-                        width = size.width,
-                        height = size.height,
-                        format = ?data.format.format(),
-                        "negotiated PipeWire capture video format"
-                    );
-                }
-            })
-            .process(|stream, data| {
-                if !data.format_ready {
-                    let _ = stream.dequeue_buffer();
-                    return;
-                }
-                let Some(mut buffer) = stream.dequeue_buffer() else {
-                    return;
-                };
-                let datas = buffer.datas_mut();
-                let Some(plane) = datas.first_mut() else {
-                    return;
-                };
-                let chunk = plane.chunk();
-                let offset = usize::try_from(chunk.offset()).unwrap_or(0);
-                let size = usize::try_from(chunk.size()).unwrap_or(0);
-                let stride = usize::try_from(chunk.stride()).unwrap_or(0);
-                let Some(slice) = plane.data() else {
-                    return;
-                };
-                let Some(valid) = slice.get(offset..offset.saturating_add(size)) else {
-                    return;
-                };
+    let _listener = stream
+        .add_local_listener_with_user_data(user_data)
+        .state_changed(|_, _, old, new| {
+            debug!(?old, ?new, "PipeWire capture stream state changed");
+        })
+        .param_changed(|_, data, id, param| handle_capture_param_changed(data, id, param))
+        .process(handle_capture_process)
+        .register()
+        .map_err(|e| PipeWireError::Stream(e.to_string()))?;
 
-                let video_size = data.format.size();
-                let Ok(dimensions) = Dimensions::new(video_size.width, video_size.height) else {
-                    return;
-                };
-                let Some(spa_fmt) = map_pw_video_format(data.format.format()) else {
-                    warn!(format = ?data.format.format(), "unsupported PipeWire capture format");
-                    return;
-                };
+    let pod_bytes = build_capture_format_pod()?;
+    let pod = Pod::from_bytes(&pod_bytes)
+        .ok_or_else(|| PipeWireError::Pod("failed to construct capture format pod".into()))?;
+    let mut params = [pod];
 
-                data.sequence += 1;
-                let frame = decode_spa_frame(valid, stride, dimensions, spa_fmt, 0, data.sequence);
-                if let Err(crossbeam_channel::TrySendError::Full(frame)) =
-                    data.frames_tx.try_send(frame)
-                {
-                    let _ = data.frames_rx_drop.try_recv();
-                    let _ = data.frames_tx.try_send(frame);
-                }
-            })
-            .register()
-            .map_err(|e| PipeWireError::Stream(e.to_string()))?;
+    let numeric_target = config.target.as_deref().and_then(|t| t.parse::<u32>().ok());
+    stream
+        .connect(
+            Direction::Input,
+            numeric_target,
+            pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+            &mut params,
+        )
+        .map_err(|e| PipeWireError::Stream(e.to_string()))?;
 
-        let pod_bytes = build_capture_format_pod()?;
-        let pod = Pod::from_bytes(&pod_bytes)
-            .ok_or_else(|| PipeWireError::Pod("failed to construct capture format pod".into()))?;
-        let mut params = [pod];
+    let mainloop_quit = mainloop.clone();
+    let _attached = cmd_rx.attach(mainloop.loop_(), move |cmd| match cmd {
+        SourceCmd::Quit => mainloop_quit.quit(),
+    });
 
-        let numeric_target = config.target.as_deref().and_then(|t| t.parse::<u32>().ok());
-        stream
-            .connect(
-                Direction::Input,
-                numeric_target,
-                pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
-                &mut params,
-            )
-            .map_err(|e| PipeWireError::Stream(e.to_string()))?;
+    let _ = ready_tx.send(Ok(()));
+    mainloop.run();
+    Ok(())
+}
 
-        let mainloop_quit = mainloop.clone();
-        let attached = cmd_rx.attach(mainloop.loop_(), move |cmd| match cmd {
-            SourceCmd::Quit => mainloop_quit.quit(),
-        });
+fn handle_capture_param_changed(data: &mut CaptureUserData, id: u32, param: Option<&Pod>) {
+    let Some(param) = param else {
+        return;
+    };
+    if id != ParamType::Format.as_raw() {
+        return;
+    }
+    let Ok((media_type, media_subtype)) = parse_format(param) else {
+        return;
+    };
+    if media_type != MediaType::Video || media_subtype != MediaSubtype::Raw {
+        return;
+    }
+    if data.format.parse(param).is_ok() {
+        data.format_ready = true;
+        let size = data.format.size();
+        info!(
+            width = size.width,
+            height = size.height,
+            format = ?data.format.format(),
+            "negotiated PipeWire capture video format"
+        );
+    }
+}
 
-        Ok((mainloop, context, core, stream, listener, attached))
-    })();
+fn handle_capture_process(stream: &pw::stream::Stream, data: &mut CaptureUserData) {
+    if !data.format_ready {
+        let _ = stream.dequeue_buffer();
+        return;
+    }
+    let Some(mut buffer) = stream.dequeue_buffer() else {
+        return;
+    };
+    let datas = buffer.datas_mut();
+    let Some(plane) = datas.first_mut() else {
+        return;
+    };
+    let chunk = plane.chunk();
+    let offset = usize::try_from(chunk.offset()).unwrap_or(0);
+    let size = usize::try_from(chunk.size()).unwrap_or(0);
+    let stride = usize::try_from(chunk.stride()).unwrap_or(0);
+    let Some(slice) = plane.data() else {
+        return;
+    };
+    let Some(valid) = slice.get(offset..offset.saturating_add(size)) else {
+        return;
+    };
 
-    match setup {
-        Ok((mainloop, _context, _core, _stream, _listener, _attached)) => {
-            let _ = ready_tx.send(Ok(()));
-            mainloop.run();
-        }
-        Err(err) => {
-            let _ = ready_tx.send(Err(err));
-        }
+    let video_size = data.format.size();
+    let Ok(dimensions) = Dimensions::new(video_size.width, video_size.height) else {
+        return;
+    };
+    let Some(spa_fmt) = map_pw_video_format(data.format.format()) else {
+        warn!(format = ?data.format.format(), "unsupported PipeWire capture format");
+        return;
+    };
+
+    data.sequence += 1;
+    let frame = decode_spa_frame(valid, stride, dimensions, spa_fmt, 0, data.sequence);
+    if let Err(crossbeam_channel::TrySendError::Full(frame)) = data.frames_tx.try_send(frame) {
+        let _ = data.frames_rx_drop.try_recv();
+        let _ = data.frames_tx.try_send(frame);
     }
 }
 
@@ -325,7 +329,7 @@ impl PipeWireVideoSink {
         let worker = thread::Builder::new()
             .name("dp2-pw-sink".into())
             .spawn(move || {
-                run_sink_loop(&config, ready_tx, cmd_rx);
+                run_sink_loop(&config, &ready_tx, cmd_rx);
                 alive_worker.store(false, Ordering::Release);
             })
             .map_err(|e| PipeWireError::Stream(format!("failed to spawn PipeWire thread: {e}")))?;
@@ -376,169 +380,177 @@ struct SinkSharedState {
 
 fn run_sink_loop(
     config: &PipeWireSinkConfig,
-    ready_tx: Sender<Result<(), PipeWireError>>,
+    ready_tx: &Sender<Result<(), PipeWireError>>,
     cmd_rx: pw::channel::Receiver<SinkCmd>,
 ) {
+    if let Err(err) = run_sink_loop_inner(config, ready_tx, cmd_rx) {
+        let _ = ready_tx.send(Err(err));
+    }
+}
+
+fn run_sink_loop_inner(
+    config: &PipeWireSinkConfig,
+    ready_tx: &Sender<Result<(), PipeWireError>>,
+    cmd_rx: pw::channel::Receiver<SinkCmd>,
+) -> Result<(), PipeWireError> {
     pw::init();
 
-    let setup = (|| -> Result<_, PipeWireError> {
-        let mainloop = pw::main_loop::MainLoopRc::new(None)
-            .map_err(|e| PipeWireError::Connect(e.to_string()))?;
-        let context = pw::context::ContextRc::new(&mainloop, None)
-            .map_err(|e| PipeWireError::Connect(e.to_string()))?;
-        let core = connect_core(&context, config.remote_name.as_deref())?;
+    let mainloop =
+        pw::main_loop::MainLoopRc::new(None).map_err(|e| PipeWireError::Connect(e.to_string()))?;
+    let context = pw::context::ContextRc::new(&mainloop, None)
+        .map_err(|e| PipeWireError::Connect(e.to_string()))?;
+    let core = connect_core(&context, config.remote_name.as_deref())?;
 
-        let mut props = PropertiesBox::new();
-        props.insert(*pw::keys::MEDIA_TYPE, "Video");
-        props.insert(*pw::keys::MEDIA_CATEGORY, "Source");
-        props.insert(*pw::keys::MEDIA_ROLE, "Camera");
-        props.insert(*pw::keys::MEDIA_CLASS, "Video/Source");
-        props.insert(*pw::keys::NODE_NAME, config.node_name.as_str());
-        props.insert(
-            *pw::keys::NODE_DESCRIPTION,
-            config.node_description.as_str(),
-        );
-        props.insert(*pw::keys::NODE_VIRTUAL, "true");
+    let mut props = PropertiesBox::new();
+    props.insert(*pw::keys::MEDIA_TYPE, "Video");
+    props.insert(*pw::keys::MEDIA_CATEGORY, "Source");
+    props.insert(*pw::keys::MEDIA_ROLE, "Camera");
+    props.insert(*pw::keys::MEDIA_CLASS, "Video/Source");
+    props.insert(*pw::keys::NODE_NAME, config.node_name.as_str());
+    props.insert(
+        *pw::keys::NODE_DESCRIPTION,
+        config.node_description.as_str(),
+    );
+    props.insert(*pw::keys::NODE_VIRTUAL, "true");
 
-        let stream = std::rc::Rc::new(
-            pw::stream::StreamBox::new(&core, &config.node_name, props)
-                .map_err(|e| PipeWireError::Stream(e.to_string()))?,
-        );
+    let stream = pw::stream::StreamRc::new(core.clone(), &config.node_name, props)
+        .map_err(|e| PipeWireError::Stream(e.to_string()))?;
 
-        let shared = std::rc::Rc::new(std::cell::RefCell::new(SinkSharedState {
-            latest_frame: None,
-            negotiated_dims: config.dimensions,
-            negotiated_format: config.format,
-            streaming: false,
-        }));
+    let shared = std::rc::Rc::new(std::cell::RefCell::new(SinkSharedState {
+        latest_frame: None,
+        negotiated_dims: config.dimensions,
+        negotiated_format: config.format,
+        streaming: false,
+    }));
 
-        let shared_cb = shared.clone();
-        let listener = stream
-            .add_local_listener_with_user_data(())
-            .state_changed({
-                let shared = shared_cb.clone();
-                move |_, _, old, new| {
-                    debug!(?old, ?new, "PipeWire virtual camera stream state changed");
-                    shared.borrow_mut().streaming =
-                        matches!(new, pw::stream::StreamState::Streaming);
-                }
-            })
-            .param_changed({
-                let shared = shared_cb.clone();
-                move |stream, (), id, param| {
-                    let Some(param) = param else {
-                        return;
-                    };
-                    if id != ParamType::Format.as_raw() {
-                        return;
-                    }
-                    let Ok((media_type, media_subtype)) = parse_format(param) else {
-                        return;
-                    };
-                    if media_type != MediaType::Video || media_subtype != MediaSubtype::Raw {
-                        return;
-                    }
-                    let mut info = VideoInfoRaw::default();
-                    if info.parse(param).is_err() {
-                        return;
-                    }
-                    let size = info.size();
-                    let Ok(dims) = Dimensions::new(size.width, size.height) else {
-                        return;
-                    };
-                    let fmt = map_pw_to_pixel_format(info.format()).unwrap_or(PixelFormat::Rgba8);
-                    {
-                        let mut st = shared.borrow_mut();
-                        st.negotiated_dims = dims;
-                        st.negotiated_format = fmt;
-                    }
-                    info!(
-                        width = dims.width(),
-                        height = dims.height(),
-                        format = ?fmt,
-                        "negotiated PipeWire virtual camera format"
-                    );
-                    if let Ok(buf_bytes) = build_buffers_pod(dims, fmt)
-                        && let Some(pod) = Pod::from_bytes(&buf_bytes)
-                    {
-                        let mut params = [pod];
-                        if let Err(err) = stream.update_params(&mut params) {
-                            warn!(error = %err, "failed to update PipeWire sink buffer params");
-                        }
-                    }
-                }
-            })
-            .process(move |stream, ()| {
-                let st = shared_cb.borrow();
-                let Some(ref frame) = st.latest_frame else {
-                    return;
-                };
-                let Some(mut buffer) = stream.dequeue_buffer() else {
-                    return;
-                };
-                let datas = buffer.datas_mut();
-                let Some(plane) = datas.first_mut() else {
-                    return;
-                };
-                let Some(slice) = plane.data() else {
-                    return;
-                };
-                match encode_spa_frame(frame, st.negotiated_format, st.negotiated_dims, slice) {
-                    Ok(encoded) => {
-                        let chunk = plane.chunk_mut();
-                        *chunk.offset_mut() = 0;
-                        *chunk.stride_mut() = i32::try_from(encoded.stride).unwrap_or(0);
-                        *chunk.size_mut() = u32::try_from(encoded.size).unwrap_or(0);
-                    }
-                    Err(err) => {
-                        warn!(error = %err, "failed to encode frame into PipeWire output buffer");
-                    }
-                }
-            })
-            .register()
-            .map_err(|e| PipeWireError::Stream(e.to_string()))?;
-
-        let pod_bytes = build_sink_format_pod(config)?;
-        let pod = Pod::from_bytes(&pod_bytes)
-            .ok_or_else(|| PipeWireError::Pod("failed to construct sink format pod".into()))?;
-        let mut params = [pod];
-
-        stream
-            .connect(
-                Direction::Output,
-                None,
-                pw::stream::StreamFlags::DRIVER | pw::stream::StreamFlags::MAP_BUFFERS,
-                &mut params,
-            )
-            .map_err(|e| PipeWireError::Stream(e.to_string()))?;
-
-        let mainloop_quit = mainloop.clone();
-        let stream_cmd = stream.clone();
-        let shared_cmd = shared.clone();
-        let attached = cmd_rx.attach(mainloop.loop_(), move |cmd| match cmd {
-            SinkCmd::Publish(frame) => {
-                let is_streaming = {
-                    let mut st = shared_cmd.borrow_mut();
-                    st.latest_frame = Some(frame);
-                    st.streaming
-                };
-                if is_streaming {
-                    let _ = stream_cmd.trigger_process();
-                }
+    let shared_cb = shared.clone();
+    let _listener = stream
+        .add_local_listener_with_user_data(())
+        .state_changed({
+            let shared = shared_cb.clone();
+            move |_, (), old, new| {
+                debug!(?old, ?new, "PipeWire virtual camera stream state changed");
+                shared.borrow_mut().streaming = matches!(new, pw::stream::StreamState::Streaming);
             }
-            SinkCmd::Quit => mainloop_quit.quit(),
-        });
+        })
+        .param_changed({
+            let shared = shared_cb.clone();
+            move |stream, (), id, param| {
+                handle_sink_param_changed(stream, &shared, id, param);
+            }
+        })
+        .process(move |stream, ()| handle_sink_process(stream, &shared_cb))
+        .register()
+        .map_err(|e| PipeWireError::Stream(e.to_string()))?;
 
-        Ok((mainloop, context, core, stream, listener, attached))
-    })();
+    let pod_bytes = build_sink_format_pod(config)?;
+    let pod = Pod::from_bytes(&pod_bytes)
+        .ok_or_else(|| PipeWireError::Pod("failed to construct sink format pod".into()))?;
+    let mut params = [pod];
 
-    match setup {
-        Ok((mainloop, _context, _core, _stream, _listener, _attached)) => {
-            let _ = ready_tx.send(Ok(()));
-            mainloop.run();
+    stream
+        .connect(
+            Direction::Output,
+            None,
+            pw::stream::StreamFlags::DRIVER | pw::stream::StreamFlags::MAP_BUFFERS,
+            &mut params,
+        )
+        .map_err(|e| PipeWireError::Stream(e.to_string()))?;
+
+    let mainloop_quit = mainloop.clone();
+    let stream_cmd = stream.clone();
+    let shared_cmd = shared.clone();
+    let _attached = cmd_rx.attach(mainloop.loop_(), move |cmd| match cmd {
+        SinkCmd::Publish(frame) => {
+            let is_streaming = {
+                let mut st = shared_cmd.borrow_mut();
+                st.latest_frame = Some(frame);
+                st.streaming
+            };
+            if is_streaming {
+                let _ = stream_cmd.trigger_process();
+            }
+        }
+        SinkCmd::Quit => mainloop_quit.quit(),
+    });
+
+    let _ = ready_tx.send(Ok(()));
+    mainloop.run();
+    Ok(())
+}
+
+fn handle_sink_param_changed(
+    stream: &pw::stream::Stream,
+    shared: &std::cell::RefCell<SinkSharedState>,
+    id: u32,
+    param: Option<&Pod>,
+) {
+    let Some(param) = param else {
+        return;
+    };
+    if id != ParamType::Format.as_raw() {
+        return;
+    }
+    let Ok((media_type, media_subtype)) = parse_format(param) else {
+        return;
+    };
+    if media_type != MediaType::Video || media_subtype != MediaSubtype::Raw {
+        return;
+    }
+    let mut info = VideoInfoRaw::default();
+    if info.parse(param).is_err() {
+        return;
+    }
+    let size = info.size();
+    let Ok(dims) = Dimensions::new(size.width, size.height) else {
+        return;
+    };
+    let fmt = map_pw_to_pixel_format(info.format()).unwrap_or(PixelFormat::Rgba8);
+    {
+        let mut st = shared.borrow_mut();
+        st.negotiated_dims = dims;
+        st.negotiated_format = fmt;
+    }
+    info!(
+        width = dims.width(),
+        height = dims.height(),
+        format = ?fmt,
+        "negotiated PipeWire virtual camera format"
+    );
+    if let Ok(buf_bytes) = build_buffers_pod(dims, fmt)
+        && let Some(pod) = Pod::from_bytes(&buf_bytes)
+    {
+        let mut params = [pod];
+        if let Err(err) = stream.update_params(&mut params) {
+            warn!(error = %err, "failed to update PipeWire sink buffer params");
+        }
+    }
+}
+
+fn handle_sink_process(stream: &pw::stream::Stream, shared: &std::cell::RefCell<SinkSharedState>) {
+    let st = shared.borrow();
+    let Some(ref frame) = st.latest_frame else {
+        return;
+    };
+    let Some(mut buffer) = stream.dequeue_buffer() else {
+        return;
+    };
+    let datas = buffer.datas_mut();
+    let Some(plane) = datas.first_mut() else {
+        return;
+    };
+    let Some(slice) = plane.data() else {
+        return;
+    };
+    match encode_spa_frame(frame, st.negotiated_format, st.negotiated_dims, slice) {
+        Ok(encoded) => {
+            let chunk = plane.chunk_mut();
+            *chunk.offset_mut() = 0;
+            *chunk.stride_mut() = i32::try_from(encoded.stride).unwrap_or(0);
+            *chunk.size_mut() = u32::try_from(encoded.size).unwrap_or(0);
         }
         Err(err) => {
-            let _ = ready_tx.send(Err(err));
+            warn!(error = %err, "failed to encode frame into PipeWire output buffer");
         }
     }
 }

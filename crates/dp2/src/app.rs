@@ -29,7 +29,6 @@ use crate::{AppError, Cli, Command, default_varlink_socket, init_tracing};
 /// ```no_run
 /// let _code = dp2::entry();
 /// ```
-#[must_use]
 pub fn entry() -> ExitCode {
     let filter = std::env::var("DP2_LOG")
         .ok()

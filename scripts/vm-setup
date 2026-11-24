@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Iain Lane <iain@orangesquash.org.uk>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+set -euo pipefail
+
+VM_NAME="${DP2_VM_NAME:-dp2-test}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MODEL_DIR="${REPO_ROOT}/models"
+TESTDATA_DIR="${REPO_ROOT}/testdata"
+
+MODEL_URL="https://huggingface.co/christianengel/DepthPro2-S-ONNX/resolve/main/onnx/model_stream4.onnx"
+MODEL_PATH="${MODEL_DIR}/depthpro2-s-stream4.onnx"
+
+VIDEO_URL="https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.webm"
+VIDEO_PATH="${TESTDATA_DIR}/flower.webm"
+
+mkdir -p "${MODEL_DIR}" "${TESTDATA_DIR}"
+
+if ! orb list | awk '{print $1}' | grep -qx "${VM_NAME}"; then
+  echo "Creating OrbStack Linux VM '${VM_NAME}' (fedora:44)..."
+  orb create fedora:44 "${VM_NAME}"
+fi
+
+echo "Installing Linux build and PipeWire test dependencies in '${VM_NAME}'..."
+orb -m "${VM_NAME}" sudo dnf install -y \
+  cargo \
+  clang-devel \
+  clippy \
+  ffmpeg-free \
+  gcc \
+  gstreamer1 \
+  gstreamer1-plugins-base \
+  gstreamer1-plugins-good \
+  onnxruntime \
+  pipewire \
+  pipewire-devel \
+  pipewire-gstreamer \
+  pipewire-utils \
+  pkgconf-pkg-config \
+  rust \
+  rustfmt \
+  wireplumber
+
+if [ ! -f "${MODEL_PATH}" ]; then
+  echo "Downloading Depth Pro 2 S streaming ONNX model..."
+  curl -fsSL --retry 3 -o "${MODEL_PATH}.tmp" "${MODEL_URL}"
+  mv "${MODEL_PATH}.tmp" "${MODEL_PATH}"
+fi
+
+if [ ! -f "${VIDEO_PATH}" ]; then
+  echo "Downloading Depth Pro 2 sample video..."
+  curl -fsSL --retry 3 -o "${VIDEO_PATH}.tmp" "${VIDEO_URL}"
+  mv "${VIDEO_PATH}.tmp" "${VIDEO_PATH}"
+fi
+
+echo "VM '${VM_NAME}' is provisioned."
+echo "  Model: ${MODEL_PATH}"
+echo "  Video: ${VIDEO_PATH}"

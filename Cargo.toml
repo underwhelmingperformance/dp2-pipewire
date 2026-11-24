@@ -40,7 +40,7 @@ ort = { version = "2.0.0-rc.15", default-features = false, features = [
   "std",
   "tracing",
 ] }
-pipewire = "0.10.1"
+pipewire = { version = "0.10.1", features = ["v1_0_0"] }
 pretty_assertions = "1.4.1"
 rstest = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }
