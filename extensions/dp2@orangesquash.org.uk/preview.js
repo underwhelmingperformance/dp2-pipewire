@@ -10,11 +10,12 @@ import St from "gi://St";
 
 import * as PopupMenu from "resource:///org/gnome/shell/ui/popupMenu.js";
 
-const PREVIEW_WIDTH = 280;
-const PREVIEW_HEIGHT = 210;
+const PREVIEW_WIDTH = 288;
+const PREVIEW_HEIGHT = 186;
 
 /**
- * Inline video preview menu item rendered with St.ImageContent.
+ * Inline live video preview card rendered inside the top-bar popover using
+ * St.ImageContent.
  */
 export const PreviewMenuItem = GObject.registerClass(
   class PreviewMenuItem extends PopupMenu.PopupBaseMenuItem {
@@ -44,12 +45,26 @@ export const PreviewMenuItem = GObject.registerClass(
         visible: false,
       });
 
-      this._placeholder = new St.Label({
-        text: "Waiting for video frame…",
+      const placeholderBox = new St.BoxLayout({
+        orientation: Clutter.Orientation.VERTICAL,
         x_align: Clutter.ActorAlign.CENTER,
         y_align: Clutter.ActorAlign.CENTER,
+        style_class: "dp2-preview-placeholder-box",
+      });
+      placeholderBox.add_child(
+        new St.Icon({
+          icon_name: "camera-video-symbolic",
+          icon_size: 28,
+          style_class: "dp2-preview-placeholder-icon",
+        }),
+      );
+      this._placeholderLabel = new St.Label({
+        text: "Waiting for video frame…",
+        x_align: Clutter.ActorAlign.CENTER,
         style_class: "dp2-preview-placeholder",
       });
+      placeholderBox.add_child(this._placeholderLabel);
+      this._placeholder = placeholderBox;
 
       this._frameBin = new St.Bin({
         width: PREVIEW_WIDTH,
@@ -78,7 +93,7 @@ export const PreviewMenuItem = GObject.registerClass(
     showPlaceholder(message) {
       if (this._frameBin.get_child() !== this._placeholder)
         this._frameBin.set_child(this._placeholder);
-      this._placeholder.text = message;
+      this._placeholderLabel.text = message;
       this._imageActor.visible = false;
     }
 
@@ -102,7 +117,7 @@ export const PreviewMenuItem = GObject.registerClass(
       );
 
       const aspectHeight = Math.max(
-        120,
+        135,
         Math.min(
           PREVIEW_HEIGHT,
           Math.round((PREVIEW_WIDTH * frame.height) / frame.width),

@@ -35,5 +35,8 @@ vm-test-pipeline:
 vm-test-gnome:
     nix build --no-link --print-build-logs .#checks.x86_64-linux.vm-gnome-extension
 
+record-demo:
+    scripts/record-demo
+
 check: clippy test doc deny audit reuse
     nix flake check

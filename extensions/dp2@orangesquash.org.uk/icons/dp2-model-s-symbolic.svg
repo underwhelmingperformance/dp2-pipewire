@@ -1,0 +1,10 @@
+<!--
+SPDX-FileCopyrightText: 2026 Iain Lane <iain@orangesquash.org.uk>
+
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <rect x="2" y="10" width="3" height="4" rx="1" fill="#bebebe"/>
+  <rect x="6.5" y="7" width="3" height="7" rx="1" fill="#bebebe" opacity="0.3"/>
+  <rect x="11" y="3" width="3" height="11" rx="1" fill="#bebebe" opacity="0.3"/>
+</svg>

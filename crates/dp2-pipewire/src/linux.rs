@@ -475,6 +475,7 @@ fn run_sink_loop_inner(
         config.node_description.as_str(),
     );
     props.insert(*pw::keys::NODE_VIRTUAL, "true");
+    props.insert(*pw::keys::NODE_DRIVER, "true");
 
     let stream = pw::stream::StreamRc::new(core.clone(), &config.node_name, props)
         .map_err(|e| PipeWireError::Stream(e.to_string()))?;

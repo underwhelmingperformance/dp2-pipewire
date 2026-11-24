@@ -17,6 +17,7 @@ import { PreviewMenuItem } from "./preview.js";
 import { Dp2VarlinkClient } from "./varlink.js";
 
 const PREVIEW_INTERVAL_MS = 250;
+
 const COLORMAPS = [
   { id: "turbo", label: "Turbo" },
   { id: "viridis", label: "Viridis" },
@@ -24,11 +25,55 @@ const COLORMAPS = [
   { id: "grayscale", label: "Grey" },
 ];
 
+const EFFECT_ICONS = {
+  "depth-map": "preferences-color-symbolic",
+  "depth-of-field": "camera-photo-symbolic",
+  "background-blur": "view-reveal-symbolic",
+  "background-replace": "image-x-generic-symbolic",
+  "split-view": "view-dual-symbolic",
+  passthrough: "camera-web-symbolic",
+};
+
+function shortModelLabel(model) {
+  const id = (model.id ?? "").toLowerCase();
+  const tokens = id.split(/[-_]/);
+  const isStream = tokens.some((t) => t.startsWith("stream"));
+  let tier = model.id.toUpperCase();
+  if (tokens.includes("s")) tier = "S";
+  else if (tokens.includes("b")) tier = "B";
+  else if (tokens.includes("l")) tier = "L";
+  else if (tokens.includes("h")) tier = "H+";
+  return isStream ? `${tier} Stream` : tier;
+}
+
+function modelIconName(model) {
+  const id = (model.id ?? "").toLowerCase();
+  const tokens = id.split(/[-_]/);
+  if (tokens.some((t) => t.startsWith("stream")))
+    return "dp2-model-stream-symbolic";
+  if (tokens.includes("b")) return "dp2-model-b-symbolic";
+  if (tokens.includes("l") || tokens.includes("h"))
+    return "dp2-model-l-symbolic";
+  return "dp2-model-s-symbolic";
+}
+
+function formatLatency(ms) {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return null;
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)} s`;
+  return `${Math.round(ms)} ms`;
+}
+
+function cleanSourceLabel(description, name) {
+  const raw = (description || name || "").trim();
+  return raw.replace(/^(?:PipeWire\s+source|Video:)\s+/i, "");
+}
+
 const Dp2Indicator = GObject.registerClass(
   class Dp2Indicator extends PanelMenu.Button {
-    _init() {
+    _init(extensionPath) {
       super._init(0.5, "Depth Pro 2 Camera", false);
 
+      this._extensionPath = extensionPath;
       this._client = new Dp2VarlinkClient();
       this._previewTimerId = 0;
       this._refreshInFlight = false;
@@ -42,13 +87,7 @@ const Dp2Indicator = GObject.registerClass(
         icon_name: "camera-video-symbolic",
         style_class: "system-status-icon",
       });
-      this._panelLabel = new St.Label({
-        text: "DP2",
-        y_align: Clutter.ActorAlign.CENTER,
-        style_class: "dp2-panel-label",
-      });
       panelBox.add_child(this._panelIcon);
-      panelBox.add_child(this._panelLabel);
       this.add_child(panelBox);
 
       this._buildMenu();
@@ -63,42 +102,69 @@ const Dp2Indicator = GObject.registerClass(
       });
     }
 
+    _customIcon(iconName) {
+      const path = GLib.build_filenamev([
+        this._extensionPath,
+        "icons",
+        `${iconName}.svg`,
+      ]);
+      return Gio.icon_new_for_string(path);
+    }
+
     _buildMenu() {
+      this.menu.box.add_style_class_name("dp2-menu");
+
       this._previewItem = new PreviewMenuItem();
       this.menu.addMenuItem(this._previewItem);
 
-      this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+      this._modelSection = new PopupMenu.PopupMenuSection();
+      this.menu.addMenuItem(this._modelSection);
 
+      this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem("Effect"));
       this._effectsSection = new PopupMenu.PopupMenuSection();
       this.menu.addMenuItem(this._effectsSection);
 
       this._optionsSection = new PopupMenu.PopupMenuSection();
       this.menu.addMenuItem(this._optionsSection);
 
-      this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-
-      this._sourceMenu = new PopupMenu.PopupSubMenuMenuItem("Source Camera");
-      this.menu.addMenuItem(this._sourceMenu);
-
-      this._modelMenu = new PopupMenu.PopupSubMenuMenuItem("Depth Model");
-      this.menu.addMenuItem(this._modelMenu);
-
-      this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-
-      const resetItem = new PopupMenu.PopupMenuItem(
-        "Reset Temporal Depth State",
+      this.menu.addMenuItem(
+        new PopupMenu.PopupSeparatorMenuItem("Input Source"),
       );
-      resetItem.connect("activate", () => {
+      this._sourcesSection = new PopupMenu.PopupMenuSection();
+      this.menu.addMenuItem(this._sourcesSection);
+
+      this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+      this._buildFooter();
+    }
+
+    _buildFooter() {
+      const footerItem = new PopupMenu.PopupBaseMenuItem({
+        reactive: false,
+        can_focus: false,
+        style_class: "dp2-footer-item",
+      });
+
+      const row = new St.BoxLayout({
+        x_expand: true,
+        style_class: "dp2-footer-row",
+      });
+
+      const resetBtn = this._makeActionButton(
+        "view-refresh-symbolic",
+        "Reset Depth",
+      );
+      resetBtn.connect("clicked", () => {
         this._client
           .resetDepthState()
           .catch((err) => logError(err, "dp2 reset depth failed"));
       });
-      this.menu.addMenuItem(resetItem);
 
-      const stopItem = new PopupMenu.PopupMenuItem(
-        "Stop Virtual Camera Service",
+      const stopBtn = this._makeActionButton(
+        "media-playback-stop-symbolic",
+        "Stop",
       );
-      stopItem.connect("activate", () => {
+      stopBtn.add_style_class_name("dp2-footer-stop");
+      stopBtn.connect("clicked", () => {
         this._client
           .shutdown()
           .then(() => {
@@ -107,7 +173,37 @@ const Dp2Indicator = GObject.registerClass(
           })
           .catch((err) => logError(err, "dp2 shutdown failed"));
       });
-      this.menu.addMenuItem(stopItem);
+
+      row.add_child(resetBtn);
+      row.add_child(stopBtn);
+      footerItem.add_child(row);
+      this.menu.addMenuItem(footerItem);
+    }
+
+    _makeActionButton(iconName, labelText) {
+      const content = new St.BoxLayout({
+        x_align: Clutter.ActorAlign.CENTER,
+        y_align: Clutter.ActorAlign.CENTER,
+        style_class: "dp2-button-content",
+      });
+      content.add_child(
+        new St.Icon({
+          icon_name: iconName,
+          icon_size: 14,
+        }),
+      );
+      content.add_child(
+        new St.Label({
+          text: labelText,
+          y_align: Clutter.ActorAlign.CENTER,
+        }),
+      );
+      return new St.Button({
+        child: content,
+        can_focus: true,
+        x_expand: true,
+        style_class: "dp2-footer-button",
+      });
     }
 
     async refresh() {
@@ -124,10 +220,10 @@ const Dp2Indicator = GObject.registerClass(
 
         this._lastStatus = status;
         this._updateCaption(status);
+        this._rebuildModels(models, status.active_model);
         this._rebuildEffects(effects, status.active_effect);
         this._rebuildOptions(status.active_effect);
         this._rebuildSources(sources, status.source_name);
-        this._rebuildModels(models, status.active_model);
         await this._pollPreviewOnce();
       } catch (err) {
         this._previewItem.showPlaceholder("dp2 service unavailable");
@@ -143,11 +239,12 @@ const Dp2Indicator = GObject.registerClass(
         parts.push(
           `${status.frame_dimensions.width}×${status.frame_dimensions.height}`,
         );
-      if (typeof status.last_inference_ms === "number")
-        parts.push(`${Math.round(status.last_inference_ms)} ms`);
-      if (status.active_model) parts.push(status.active_model);
+      const latency = formatLatency(status.last_inference_ms);
+      if (latency) parts.push(latency);
       if (status.source_name && status.source_name !== "none")
-        parts.push(status.source_name);
+        parts.push(
+          cleanSourceLabel(status.source_description, status.source_name),
+        );
 
       this._previewItem.setCaption(
         parts.length > 0
@@ -156,21 +253,84 @@ const Dp2Indicator = GObject.registerClass(
       );
     }
 
+    _rebuildModels(models, activeModelId) {
+      this._modelSection.removeAll();
+      if (models.length === 0) return;
+
+      const rowItem = new PopupMenu.PopupBaseMenuItem({
+        reactive: false,
+        can_focus: false,
+        style_class: "dp2-segmented-item",
+      });
+
+      const box = new St.BoxLayout({
+        orientation: Clutter.Orientation.VERTICAL,
+        x_expand: true,
+        style_class: "dp2-segmented-box",
+      });
+
+      const linked = new St.BoxLayout({
+        x_expand: true,
+        style_class: "dp2-linked",
+      });
+
+      models.forEach((model, index) => {
+        const isActive = model.id === activeModelId;
+        const content = new St.BoxLayout({
+          x_align: Clutter.ActorAlign.CENTER,
+          y_align: Clutter.ActorAlign.CENTER,
+          style_class: "dp2-button-content",
+        });
+        content.add_child(
+          new St.Icon({
+            gicon: this._customIcon(modelIconName(model)),
+            icon_size: 14,
+          }),
+        );
+        content.add_child(
+          new St.Label({
+            text: shortModelLabel(model),
+            y_align: Clutter.ActorAlign.CENTER,
+          }),
+        );
+
+        const classes = ["dp2-linked-button"];
+        if (index === 0) classes.push("dp2-linked-first");
+        if (index === models.length - 1) classes.push("dp2-linked-last");
+        if (isActive) classes.push("dp2-linked-active");
+
+        const btn = new St.Button({
+          child: content,
+          can_focus: model.available,
+          reactive: model.available,
+          x_expand: true,
+          style_class: classes.join(" "),
+        });
+        if (model.available) {
+          btn.connect("clicked", () => {
+            this.selectModel(model.id).catch((err) =>
+              logError(err, "dp2 setModel failed"),
+            );
+          });
+        }
+        linked.add_child(btn);
+      });
+
+      box.add_child(linked);
+      rowItem.add_child(box);
+      this._modelSection.addMenuItem(rowItem);
+    }
+
     _rebuildEffects(effects, activeEffect) {
       this._effectsSection.removeAll();
 
-      const header = new PopupMenu.PopupMenuItem("Effect", {
-        reactive: false,
-        can_focus: false,
-        style_class: "dp2-section-header",
-      });
-      this._effectsSection.addMenuItem(header);
-
       for (const effect of effects) {
-        const item = new PopupMenu.PopupMenuItem(effect.name);
+        const iconName =
+          EFFECT_ICONS[effect.id] ?? "applications-graphics-symbolic";
+        const item = new PopupMenu.PopupImageMenuItem(effect.name, iconName);
         const isActive = activeEffect && activeEffect.id === effect.id;
         item.setOrnament(
-          isActive ? PopupMenu.Ornament.DOT : PopupMenu.Ornament.NONE,
+          isActive ? PopupMenu.Ornament.CHECK : PopupMenu.Ornament.NONE,
         );
         item.connect("activate", () => {
           this.selectEffect(effect.id).catch((err) =>
@@ -186,8 +346,7 @@ const Dp2Indicator = GObject.registerClass(
       if (!activeEffect) return;
 
       if (activeEffect.id === "depth-map") {
-        this._addChipRow(
-          "Palette",
+        this._addLinkedRow(
           COLORMAPS,
           activeEffect.colormap ?? "turbo",
           (colormapId) =>
@@ -213,8 +372,7 @@ const Dp2Indicator = GObject.registerClass(
 
       if (activeEffect.id === "depth-of-field") {
         const params = activeEffect.parameters ?? {};
-        this._addChipRow(
-          "Blur Strength",
+        this._addLinkedRow(
           [
             { id: "4", label: "Soft" },
             { id: "8", label: "Medium" },
@@ -224,8 +382,7 @@ const Dp2Indicator = GObject.registerClass(
           (radius) =>
             this._applyCustomParams(activeEffect, { blur_radius: radius }),
         );
-        this._addChipRow(
-          "Focus",
+        this._addLinkedRow(
           [
             { id: "auto", label: "Auto" },
             { id: "1.0", label: "Near" },
@@ -241,8 +398,7 @@ const Dp2Indicator = GObject.registerClass(
 
       if (activeEffect.id === "background-blur") {
         const params = activeEffect.parameters ?? {};
-        this._addChipRow(
-          "Cutoff",
+        this._addLinkedRow(
           [
             { id: "1.5", label: "1.5m" },
             { id: "2.5", label: "2.5m" },
@@ -259,13 +415,12 @@ const Dp2Indicator = GObject.registerClass(
 
       if (activeEffect.id === "background-replace") {
         const params = activeEffect.parameters ?? {};
-        this._addChipRow(
-          "Backdrop",
+        this._addLinkedRow(
           [
-            { id: "#1b3a57", label: "Studio Blue" },
-            { id: "#1f2428", label: "Charcoal" },
-            { id: "#00b140", label: "Chroma" },
             { id: "gradient", label: "Sunset" },
+            { id: "#1b3a57", label: "Studio" },
+            { id: "#1f2428", label: "Dark" },
+            { id: "#00b140", label: "Chroma" },
           ],
           params.background ?? "gradient",
           (bg) => this._applyCustomParams(activeEffect, { background: bg }),
@@ -273,68 +428,54 @@ const Dp2Indicator = GObject.registerClass(
       }
     }
 
-    _addChipRow(title, options, activeId, onSelect) {
+    _addLinkedRow(options, activeId, onSelect) {
       const rowItem = new PopupMenu.PopupBaseMenuItem({
         reactive: false,
         can_focus: false,
-        style_class: "dp2-chip-item",
+        style_class: "dp2-segmented-item",
       });
 
-      const box = new St.BoxLayout({
-        orientation: Clutter.Orientation.VERTICAL,
+      const linked = new St.BoxLayout({
         x_expand: true,
-        style_class: "dp2-chip-container",
+        style_class: "dp2-linked",
       });
 
-      box.add_child(
-        new St.Label({
-          text: title,
-          style_class: "dp2-chip-title",
-        }),
-      );
+      options.forEach((opt, index) => {
+        const classes = ["dp2-linked-button"];
+        if (index === 0) classes.push("dp2-linked-first");
+        if (index === options.length - 1) classes.push("dp2-linked-last");
+        if (opt.id === activeId) classes.push("dp2-linked-active");
 
-      const chips = new St.BoxLayout({
-        x_expand: true,
-        style_class: "dp2-chip-row",
-      });
-
-      for (const opt of options) {
         const btn = new St.Button({
           label: opt.label,
           can_focus: true,
           x_expand: true,
-          style_class:
-            opt.id === activeId
-              ? "dp2-chip-button dp2-chip-active"
-              : "dp2-chip-button",
+          style_class: classes.join(" "),
         });
         btn.connect("clicked", () => {
           onSelect(opt.id).catch((err) =>
-            logError(err, `dp2 chip ${opt.id} failed`),
+            logError(err, `dp2 option ${opt.id} failed`),
           );
         });
-        chips.add_child(btn);
-      }
+        linked.add_child(btn);
+      });
 
-      box.add_child(chips);
-      rowItem.add_child(box);
+      rowItem.add_child(linked);
       this._optionsSection.addMenuItem(rowItem);
     }
 
     _rebuildSources(sources, activeSourceName) {
-      this._sourceMenu.menu.removeAll();
-      const activeLabel =
-        activeSourceName && activeSourceName !== "none"
-          ? `Source: ${activeSourceName}`
-          : "Source Camera";
-      this._sourceMenu.label.text = activeLabel;
+      this._sourcesSection.removeAll();
 
       for (const src of sources) {
-        const prefix = src.is_imported_video ? "[Video] " : "";
-        const item = new PopupMenu.PopupMenuItem(`${prefix}${src.description}`);
+        const iconName = src.is_imported_video
+          ? "video-x-generic-symbolic"
+          : "camera-web-symbolic";
+        const label = cleanSourceLabel(src.description, src.name);
+        const item = new PopupMenu.PopupImageMenuItem(label, iconName);
         item.setOrnament(
           src.name === activeSourceName
-            ? PopupMenu.Ornament.DOT
+            ? PopupMenu.Ornament.CHECK
             : PopupMenu.Ornament.NONE,
         );
         item.connect("activate", () => {
@@ -342,58 +483,19 @@ const Dp2Indicator = GObject.registerClass(
             logError(err, "dp2 setSource failed"),
           );
         });
-        this._sourceMenu.menu.addMenuItem(item);
+        this._sourcesSection.addMenuItem(item);
       }
 
-      if (sources.length > 0)
-        this._sourceMenu.menu.addMenuItem(
-          new PopupMenu.PopupSeparatorMenuItem(),
-        );
-
-      const chooseVideo = new PopupMenu.PopupMenuItem("Choose video…");
+      const chooseVideo = new PopupMenu.PopupImageMenuItem(
+        "Choose Video…",
+        "document-open-symbolic",
+      );
       chooseVideo.connect("activate", () => {
         this._chooseVideoFile().catch((err) =>
           logError(err, "dp2 choose video failed"),
         );
       });
-      this._sourceMenu.menu.addMenuItem(chooseVideo);
-    }
-
-    _rebuildModels(models, activeModelId) {
-      this._modelMenu.menu.removeAll();
-      this._modelMenu.label.text = activeModelId
-        ? `Model: ${activeModelId}`
-        : "Depth Model";
-
-      if (models.length === 0) {
-        const empty = new PopupMenu.PopupMenuItem("No models discovered", {
-          reactive: false,
-        });
-        this._modelMenu.menu.addMenuItem(empty);
-        return;
-      }
-
-      for (const model of models) {
-        const item = new PopupMenu.PopupMenuItem(
-          `${model.name} (${model.size_label})`,
-          {
-            reactive: model.available,
-          },
-        );
-        item.setOrnament(
-          model.id === activeModelId
-            ? PopupMenu.Ornament.DOT
-            : PopupMenu.Ornament.NONE,
-        );
-        if (model.available) {
-          item.connect("activate", () => {
-            this.selectModel(model.id).catch((err) =>
-              logError(err, "dp2 setModel failed"),
-            );
-          });
-        }
-        this._modelMenu.menu.addMenuItem(item);
-      }
+      this._sourcesSection.addMenuItem(chooseVideo);
     }
 
     async _applyEffect(effectSettings) {
@@ -473,7 +575,7 @@ const Dp2Indicator = GObject.registerClass(
     }
 
     async _pollPreviewOnce() {
-      const frame = await this._client.getPreview(280);
+      const frame = await this._client.getPreview(288);
       if (!frame) return;
 
       if (frame.sequence !== this._lastPreviewSeq) {
@@ -498,7 +600,7 @@ const Dp2Indicator = GObject.registerClass(
  */
 export default class Dp2Extension extends Extension {
   enable() {
-    this._indicator = new Dp2Indicator();
+    this._indicator = new Dp2Indicator(this.path);
     Main.panel.addToStatusArea("dp2-camera", this._indicator);
   }
 

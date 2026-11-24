@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Iain Lane <iain@orangesquash.org.uk>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OUT_DIR="${REPO_ROOT}/docs/demos"
+SYSTEM="${DP2_DEMO_SYSTEM:-x86_64-linux}"
+
+mkdir -p "${OUT_DIR}"
+
+echo "Building GNOME desktop demo capture VM for ${SYSTEM}..."
+STORE_PATH="$(nix build --no-link --print-out-paths --print-build-logs ".#packages.${SYSTEM}.demo-capture")"
+
+rm -f "${OUT_DIR}"/*.png "${OUT_DIR}"/*.gif "${OUT_DIR}"/*.webm
+cp "${STORE_PATH}"/*.png "${OUT_DIR}/"
+cp "${STORE_PATH}"/*.gif "${OUT_DIR}/"
+if compgen -G "${STORE_PATH}/*.webm" > /dev/null; then
+  cp "${STORE_PATH}"/*.webm "${OUT_DIR}/"
+fi
+chmod 0644 "${OUT_DIR}"/*
+
+echo "Updated demo assets in ${OUT_DIR}:"
+ls -lh "${OUT_DIR}"

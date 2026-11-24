@@ -15,7 +15,10 @@
       check.enable = false;
 
       settings.hooks = {
-        check-added-large-files.enable = true;
+        check-added-large-files = {
+          enable = true;
+          args = ["--maxkb=4096"];
+        };
         check-yaml.enable = true;
         end-of-file-fixer.enable = true;
         trim-trailing-whitespace.enable = true;

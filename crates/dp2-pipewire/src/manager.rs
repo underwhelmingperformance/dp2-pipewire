@@ -160,7 +160,7 @@ impl SourceFactory for PipeWireSourceManager {
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(&node_name);
-        let description = format!("Video: {file_label}");
+        let description = file_label.to_string();
 
         let mut sink_cfg = PipeWireSinkConfig::new(&node_name, &description, decoded.dimensions);
         sink_cfg.remote_name.clone_from(&self.remote_name);

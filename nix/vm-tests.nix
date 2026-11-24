@@ -275,10 +275,265 @@
             assert status["source_name"] == "dp2-video-flower"
       '';
     };
+    demoViewer = pkgs.writeScriptBin "dp2-demo-viewer" ''
+      #!${pkgs.python3.withPackages (p: [p.pygobject3])}/bin/python3
+      import gi
+      gi.require_version("Gtk", "4.0")
+      gi.require_version("Adw", "1")
+      gi.require_version("Gdk", "4.0")
+      gi.require_version("Gst", "1.0")
+      from gi.repository import Adw, Gdk, GLib, Gst, Gtk
+
+      Gst.init(None)
+
+      class ViewerApp(Adw.Application):
+          def __init__(self):
+              super().__init__(application_id="uk.org.orangesquash.dp2.DemoViewer")
+              self._pipeline = None
+              self._picture = None
+
+          def do_activate(self):
+              Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+              win = Adw.ApplicationWindow(application=self)
+              win.set_title("Depth Pro 2 Virtual Camera")
+              win.set_default_size(680, 540)
+
+              header = Adw.HeaderBar()
+              title = Adw.WindowTitle(
+                  title="Depth Pro 2 Virtual Camera",
+                  subtitle="Live PipeWire feed · dp2-depth",
+              )
+              header.set_title_widget(title)
+
+              self._picture = Gtk.Picture()
+              self._picture.set_can_shrink(True)
+              self._picture.set_hexpand(True)
+              self._picture.set_vexpand(True)
+
+              toolbar = Adw.ToolbarView()
+              toolbar.add_top_bar(header)
+              toolbar.set_content(self._picture)
+              win.set_content(toolbar)
+              win.present()
+
+              self._pipeline = Gst.parse_launch(
+                  "pipewiresrc target-object=dp2-depth do-timestamp=true ! "
+                  "videoconvert ! video/x-raw,format=RGBA ! "
+                  "appsink name=sink emit-signals=true drop=true max-buffers=1 sync=false"
+              )
+              sink = self._pipeline.get_by_name("sink")
+              sink.connect("new-sample", self._on_sample)
+              self._pipeline.set_state(Gst.State.PLAYING)
+
+          def _on_sample(self, sink):
+              sample = sink.emit("pull-sample")
+              if not sample:
+                  return Gst.FlowReturn.OK
+              buf = sample.get_buffer()
+              caps = sample.get_caps().get_structure(0)
+              width = caps.get_int("width").value
+              height = caps.get_int("height").value
+              ok, mapinfo = buf.map(Gst.MapFlags.READ)
+              if ok:
+                  data = bytes(mapinfo.data)
+                  buf.unmap(mapinfo)
+                  GLib.idle_add(self._set_frame, data, width, height)
+              return Gst.FlowReturn.OK
+
+          def _set_frame(self, data, width, height):
+              tex = Gdk.MemoryTexture.new(
+                  width,
+                  height,
+                  Gdk.MemoryFormat.R8G8B8A8,
+                  GLib.Bytes.new(data),
+                  width * 4,
+              )
+              self._picture.set_paintable(tex)
+              return False
+
+      ViewerApp().run(None)
+    '';
+
+    demoCaptureRaw = pkgs.testers.runNixOSTest {
+      name = "dp2-gnome-demo-capture";
+
+      nodes.machine = {pkgs, ...}: {
+        imports = [self.nixosModules.default];
+
+        virtualisation = {
+          memorySize = 6144;
+          cores = 4;
+          resolution = {
+            x = 1280;
+            y = 800;
+          };
+        };
+
+        users.users.alice = {
+          isNormalUser = true;
+          uid = 1000;
+          extraGroups = ["audio" "video" "wheel"];
+        };
+
+        services.displayManager.gdm.enable = true;
+        services.displayManager.autoLogin = {
+          enable = true;
+          user = "alice";
+        };
+        services.desktopManager.gnome.enable = true;
+
+        services.pipewire = {
+          enable = true;
+          wireplumber.enable = true;
+        };
+
+        services.dp2 = {
+          enable = true;
+          package = config.packages.dp2;
+          extensionPackage = config.packages.gnome-shell-extension;
+          installGnomeExtension = true;
+          inherit modelDir;
+        };
+
+        systemd.user.services."org.gnome.Shell@".serviceConfig.ExecStart = [
+          ""
+          "${pkgs.gnome-shell}/bin/gnome-shell --unsafe-mode"
+        ];
+
+        environment.systemPackages = [
+          demoViewer
+          pkgs.gst_all_1.gstreamer
+          pkgs.gst_all_1.gst-plugins-base
+          pkgs.gst_all_1.gst-plugins-good
+          pkgs.gtk4
+          pkgs.jq
+          pkgs.libadwaita
+          pkgs.pipewire
+        ];
+      };
+
+      testScript = ''
+        import json
+        import shlex
+
+        def as_alice(cmd):
+            env_cmd = (
+                "export XDG_RUNTIME_DIR=/run/user/1000 "
+                "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "
+                "WAYLAND_DISPLAY=wayland-0 "
+                "GI_TYPELIB_PATH=${pkgs.lib.makeSearchPath "lib/girepository-1.0" [pkgs.gtk4 pkgs.libadwaita pkgs.gst_all_1.gstreamer pkgs.gst_all_1.gst-plugins-base pkgs.pango pkgs.gdk-pixbuf pkgs.graphene pkgs.harfbuzz pkgs.glib]} "
+                "GST_PLUGIN_SYSTEM_PATH_1_0=/run/current-system/sw/lib/gstreamer-1.0; "
+                f"{cmd}"
+            )
+            return machine.succeed(f"su - alice -c {shlex.quote(env_cmd)}")
+
+        def shell_eval(js):
+            out = as_alice(
+                f"gdbus call --session -d org.gnome.Shell -o /org/gnome/Shell -m org.gnome.Shell.Eval {shlex.quote(js)}"
+            ).strip()
+            assert out.startswith("(true,"), f"GNOME Shell eval failed: {out}"
+            return out
+
+        def frame_count():
+            return int(json.loads(as_alice("dp2 status"))["frames_processed"])
+
+        def wait_new_frames(delta=2):
+            start = frame_count()
+            for _ in range(45):
+                if frame_count() >= start + delta:
+                    break
+                machine.sleep(1)
+            shell_eval("Main.panel.statusArea['dp2-camera']._pollPreviewOnce(); 'ok'")
+            machine.sleep(1)
+
+        seq = [0]
+        def snap_frames(count=4):
+            for _ in range(count):
+                seq[0] += 1
+                machine.screenshot(f"frame-{seq[0]:04d}")
+                machine.sleep(1)
+
+        machine.wait_for_unit("display-manager.service")
+        machine.wait_for_file("/run/user/1000/wayland-0")
+        machine.wait_for_unit("default.target", "alice")
+        machine.wait_for_file("/run/user/1000/uk.org.orangesquash.dp2")
+
+        machine.wait_until_succeeds(
+            "su - alice -c 'export XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus; gdbus call --session -d org.gnome.Shell -o /org/gnome/Shell -m org.gnome.Shell.Eval Main.layoutManager._startingUp' | grep -q 'true,..false'"
+        )
+        machine.send_key("esc")
+
+        as_alice("gsettings set org.gnome.shell disable-user-extensions false")
+        as_alice("gnome-extensions enable dp2@orangesquash.org.uk")
+        machine.wait_until_succeeds(
+            "su - alice -c 'export XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus; gnome-extensions info dp2@orangesquash.org.uk' | grep -q 'State: ACTIVE'"
+        )
+
+        # Open top-bar menu (triggers socket activation) and import looping video.
+        shell_eval("Main.panel.statusArea['dp2-camera'].menu.open(false); 'ok'")
+        machine.wait_until_succeeds(
+            "su - alice -c 'export XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus; [ \"$(systemctl --user is-active dp2.service)\" = \"active\" ]'"
+        )
+        shell_eval("Main.panel.statusArea['dp2-camera'].importVideoPath('${testVideo}'); 'ok'")
+        wait_new_frames(2)
+
+        # Launch native Adwaita PipeWire virtual camera viewer window on the left of the desktop.
+        as_alice("nohup dp2-demo-viewer >/tmp/viewer.log 2>&1 &")
+        machine.sleep(3)
+        shell_eval("let w = global.get_window_actors().map(a => a.meta_window).find(w => w.get_title() === 'Depth Pro 2 Virtual Camera'); if (w) w.move_frame(false, 48, 96); 'ok'")
+        shell_eval("Main.panel.statusArea['dp2-camera'].menu.open(false); 'ok'")
+        wait_new_frames(1)
+
+        # 1. Depth Map (Turbo)
+        machine.screenshot("gnome-depth-turbo")
+        snap_frames(4)
+
+        # 2. Depth Map (Viridis)
+        shell_eval("Main.panel.statusArea['dp2-camera'].selectEffect('depth-map', {colormap: 'viridis'}); 'ok'")
+        wait_new_frames(2)
+        machine.screenshot("gnome-depth-viridis")
+        snap_frames(4)
+
+        # 3. Depth Map (Grayscale) + switch to streaming model
+        shell_eval("Main.panel.statusArea['dp2-camera'].selectEffect('depth-map', {colormap: 'grayscale'}); 'ok'")
+        wait_new_frames(2)
+        machine.screenshot("gnome-depth-grayscale")
+        snap_frames(4)
+
+        # 4. Switch model to s-stream4 via linked model selector
+        shell_eval("Main.panel.statusArea['dp2-camera'].selectModel('s-stream4'); 'ok'")
+        shell_eval("Main.panel.statusArea['dp2-camera'].selectEffect('depth-map', {colormap: 'magma'}); 'ok'")
+        wait_new_frames(2)
+        machine.screenshot("gnome-depth-magma-stream")
+        snap_frames(4)
+
+        # 5. Passthrough (original video feed)
+        shell_eval("Main.panel.statusArea['dp2-camera'].selectEffect('passthrough'); 'ok'")
+        wait_new_frames(2)
+        machine.screenshot("gnome-passthrough")
+        snap_frames(4)
+      '';
+    };
+
+    demoCapture =
+      pkgs.runCommand "dp2-gnome-demo-assets" {
+        nativeBuildInputs = [pkgs.ffmpeg-headless];
+      } ''
+        mkdir -p "$out"
+        cp ${demoCaptureRaw}/gnome-*.png "$out/"
+
+        ffmpeg -y -framerate 2 -i "${demoCaptureRaw}/frame-%04d.png" \
+          -vf "scale=960:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3" \
+          "$out/gnome-depth-map-demo.gif"
+      '';
   in {
     checks = lib.optionalAttrs isLinux {
       vm-pipeline = vmPipelineTest;
       vm-gnome-extension = vmGnomeExtensionTest;
+    };
+
+    packages = lib.optionalAttrs isLinux {
+      demo-capture = demoCapture;
     };
   };
 }
