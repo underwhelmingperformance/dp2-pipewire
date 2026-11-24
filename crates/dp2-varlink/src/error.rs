@@ -21,6 +21,24 @@ pub enum Dp2ServiceError {
         /// Explanation of the validation failure.
         message: String,
     },
+
+    /// Discovering, switching, importing, or removing a video source failed.
+    SourceFailed {
+        /// Explanation of the source failure.
+        message: String,
+    },
+
+    /// Loading or switching a Depth Pro 2 model failed.
+    ModelFailed {
+        /// Explanation of the model failure.
+        message: String,
+    },
+
+    /// Generating a preview frame failed.
+    PreviewFailed {
+        /// Explanation of the preview failure.
+        message: String,
+    },
 }
 
 impl std::fmt::Display for Dp2ServiceError {
@@ -28,6 +46,9 @@ impl std::fmt::Display for Dp2ServiceError {
         match self {
             Self::UnknownEffect { id } => write!(f, "unknown effect: {id}"),
             Self::InvalidParameter { message } => write!(f, "invalid parameter: {message}"),
+            Self::SourceFailed { message } => write!(f, "source error: {message}"),
+            Self::ModelFailed { message } => write!(f, "model error: {message}"),
+            Self::PreviewFailed { message } => write!(f, "preview error: {message}"),
         }
     }
 }

@@ -12,8 +12,11 @@ mod types;
 
 pub use client::Dp2VarlinkClient;
 pub use error::{Dp2ServiceError, VarlinkError};
-pub use service::{INTERFACE_NAME, serve_on_socket};
+pub use service::{
+    INTERFACE_NAME, serve_from_systemd_or_socket, serve_on_listener, serve_on_socket,
+};
 pub use types::{
-    AckReply, DimensionsInfo, EffectInfo, EffectReply, EffectSettings, EffectsReply, StatusReply,
-    StatusSnapshot,
+    AckReply, DimensionsInfo, EffectInfo, EffectReply, EffectSettings, EffectsReply, ModelInfo,
+    ModelReply, ModelsReply, PreviewFrameInfo, PreviewReply, SourceDeviceInfo, SourceReply,
+    SourcesReply, StatusReply, StatusSnapshot,
 };

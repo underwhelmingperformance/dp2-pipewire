@@ -19,8 +19,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
 dp2-core.workspace = true
 futures-util.workspace = true
+listenfd.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

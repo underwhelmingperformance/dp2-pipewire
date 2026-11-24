@@ -8,8 +8,10 @@ use std::{
 };
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use dp2_core::{Colormap, DepthMapConfig, Dimensions, EffectConfig, EffectId, PixelFormat};
-use dp2_depth::{DepthPro2Config, FocalLengthPolicy};
+use dp2_core::{
+    Colormap, DepthMapConfig, Dimensions, EffectConfig, EffectId, ModelId, PixelFormat,
+};
+use dp2_depth::{DepthPro2Config, FocalLengthPolicy, ModelCatalog};
 use dp2_pipewire::{PipeWireSinkConfig, PipeWireSourceConfig};
 use dp2_varlink::INTERFACE_NAME;
 
@@ -45,6 +47,54 @@ pub enum Command {
         #[command(subcommand)]
         effect: SetEffectCommand,
     },
+    /// List discovered PipeWire video sources and imported looping videos.
+    ListSources(SocketArgs),
+    /// Switch the active PipeWire video source at runtime.
+    SetSource {
+        /// Shared Varlink socket option.
+        #[command(flatten)]
+        socket: SocketArgs,
+        /// Target PipeWire node name (omit to select the default camera).
+        name: Option<String>,
+    },
+    /// Import a video file as a looping PipeWire camera device.
+    ImportVideo {
+        /// Shared Varlink socket option.
+        #[command(flatten)]
+        socket: SocketArgs,
+        /// Path to the video file to decode and loop.
+        path: PathBuf,
+        /// Keep the current active source instead of switching immediately.
+        #[arg(long, default_value_t = false)]
+        no_select: bool,
+    },
+    /// Remove a previously imported looping video device.
+    RemoveVideo {
+        /// Shared Varlink socket option.
+        #[command(flatten)]
+        socket: SocketArgs,
+        /// PipeWire node name of the imported video device.
+        name: String,
+    },
+    /// List configured Depth Pro 2 model variants.
+    ListModels(SocketArgs),
+    /// Switch the active Depth Pro 2 model variant at runtime.
+    SetModel {
+        /// Shared Varlink socket option.
+        #[command(flatten)]
+        socket: SocketArgs,
+        /// Model identifier from `dp2 list-models`.
+        id: String,
+    },
+    /// Fetch a downsampled RGBA8 preview frame (JSON with base64 payload).
+    Preview {
+        /// Shared Varlink socket option.
+        #[command(flatten)]
+        socket: SocketArgs,
+        /// Maximum preview width in pixels.
+        #[arg(long, default_value_t = 240)]
+        max_width: u32,
+    },
     /// Reset Depth Pro 2 temporal streaming state over Varlink.
     ResetDepth(SocketArgs),
     /// Request clean shutdown of a running daemon over Varlink.
@@ -65,6 +115,11 @@ pub struct RunArgs {
     /// Target PipeWire video node name, serial, or object ID.
     #[arg(long)]
     pub source: Option<String>,
+
+    /// Stay alive waiting for Varlink source selection even when no initial
+    /// source is connected.
+    #[arg(long, default_value_t = false)]
+    pub idle: bool,
 
     /// PipeWire `node.name` for the virtual camera output device.
     #[arg(long, default_value = "dp2-depth")]
@@ -96,9 +151,18 @@ pub struct RunArgs {
     #[arg(long, env = "PIPEWIRE_REMOTE")]
     pub pipewire_remote: Option<String>,
 
-    /// Path to the Depth Pro 2 ONNX model file.
+    /// Path to the primary Depth Pro 2 ONNX model file.
     #[arg(long, env = "DP2_MODEL_PATH")]
-    pub model: PathBuf,
+    pub model: Option<PathBuf>,
+
+    /// Optional directory scanned for Depth Pro 2 `*.onnx` models for runtime
+    /// model-size switching.
+    #[arg(long, env = "DP2_MODEL_DIR")]
+    pub model_dir: Option<PathBuf>,
+
+    /// Additional selectable model entries in `ID=PATH` format.
+    #[arg(long = "extra-model", value_parser = parse_model_spec)]
+    pub extra_models: Vec<(String, PathBuf)>,
 
     /// Optional path to the Depth Pro 2 focal-length estimator ONNX model.
     #[arg(long, env = "DP2_FOCAL_MODEL_PATH")]
@@ -121,7 +185,8 @@ pub struct RunArgs {
     #[arg(long)]
     pub ort_threads: Option<usize>,
 
-    /// Path where the Varlink control Unix socket will be bound.
+    /// Path where the Varlink control Unix socket will be bound when not
+    /// inherited from systemd socket activation (`LISTEN_FDS`).
     #[arg(long, env = "DP2_VARLINK_SOCKET")]
     pub varlink_socket: Option<PathBuf>,
 
@@ -205,7 +270,34 @@ impl RunArgs {
         Ok(cfg)
     }
 
-    /// Builds the [`DepthPro2Config`] corresponding to these CLI flags.
+    /// Builds the focal-length policy configured by these CLI flags.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use clap::Parser;
+    /// use dp2::{Cli, Command};
+    /// use dp2_depth::FocalLengthPolicy;
+    ///
+    /// let cli = Cli::try_parse_from(["dp2", "run", "--focal-length-px", "525.0"])?;
+    /// let Command::Run(args) = cli.command else {
+    ///     panic!("expected run")
+    /// };
+    /// assert_eq!(args.focal_policy(), FocalLengthPolicy::FixedPx(525.0));
+    /// # Ok::<(), clap::Error>(())
+    /// ```
+    #[must_use]
+    pub fn focal_policy(&self) -> FocalLengthPolicy {
+        if let Some(f_px) = self.focal_length_px {
+            FocalLengthPolicy::FixedPx(f_px)
+        } else if let Some(ref focal_model) = self.focal_model {
+            FocalLengthPolicy::EstimateWithModel(focal_model.clone())
+        } else {
+            FocalLengthPolicy::HorizontalFovDegrees(self.fov_degrees)
+        }
+    }
+
+    /// Builds the primary [`DepthPro2Config`] when `--model` was supplied.
     ///
     /// # Examples
     ///
@@ -225,28 +317,87 @@ impl RunArgs {
     /// let Command::Run(args) = cli.command else {
     ///     panic!("expected run")
     /// };
-    /// assert_eq!(
-    ///     args.depth_config().focal_length,
-    ///     FocalLengthPolicy::FixedPx(525.0)
-    /// );
+    /// let cfg = args.depth_config().expect("model provided");
+    /// assert_eq!(cfg.focal_length, FocalLengthPolicy::FixedPx(525.0));
     /// # Ok::<(), clap::Error>(())
     /// ```
     #[must_use]
-    pub fn depth_config(&self) -> DepthPro2Config {
-        let focal_length = if let Some(f_px) = self.focal_length_px {
-            FocalLengthPolicy::FixedPx(f_px)
-        } else if let Some(ref focal_model) = self.focal_model {
-            FocalLengthPolicy::EstimateWithModel(focal_model.clone())
-        } else {
-            FocalLengthPolicy::HorizontalFovDegrees(self.fov_degrees)
-        };
-
-        DepthPro2Config {
-            model_path: self.model.clone(),
+    pub fn depth_config(&self) -> Option<DepthPro2Config> {
+        self.model.as_ref().map(|model_path| DepthPro2Config {
+            model_path: model_path.clone(),
             ort_dylib_path: self.ort_dylib.clone(),
-            focal_length,
+            focal_length: self.focal_policy(),
             intra_threads: self.ort_threads,
+        })
+    }
+
+    /// Builds the [`ModelCatalog`] combining `--model-dir`, `--model`, and
+    /// `--extra-model` entries, returning both the catalog and the initial
+    /// model identifier if one was configured.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use clap::Parser;
+    /// use dp2::{Cli, Command};
+    /// use dp2_core::{ModelFactory, ModelId};
+    ///
+    /// let cli = Cli::try_parse_from([
+    ///     "dp2",
+    ///     "run",
+    ///     "--model",
+    ///     "models/depthpro2-s-stream4.onnx",
+    ///     "--extra-model",
+    ///     "b=models/depthpro2-b-stream4.onnx",
+    /// ])?;
+    /// let Command::Run(args) = cli.command else {
+    ///     panic!("expected run")
+    /// };
+    /// let (catalog, primary) = args.model_catalog();
+    /// assert_eq!(primary, Some(ModelId::new("s-stream4")));
+    /// assert_eq!(catalog.list_models().len(), 2);
+    /// # Ok::<(), clap::Error>(())
+    /// ```
+    #[must_use]
+    pub fn model_catalog(&self) -> (ModelCatalog, Option<ModelId>) {
+        let focal = self.focal_policy();
+        let mut catalog = self
+            .model_dir
+            .as_deref()
+            .map_or_else(ModelCatalog::new, |dir| {
+                ModelCatalog::from_directory(
+                    dir,
+                    self.ort_dylib.as_deref(),
+                    &focal,
+                    self.ort_threads,
+                )
+            });
+
+        let mut primary_id = None;
+        if let Some(cfg) = self.depth_config() {
+            let entry = ModelCatalog::entry_from_config(None, cfg);
+            primary_id = Some(entry.descriptor.id.clone());
+            catalog.register(entry);
         }
+
+        for (id, path) in &self.extra_models {
+            let cfg = DepthPro2Config {
+                model_path: path.clone(),
+                ort_dylib_path: self.ort_dylib.clone(),
+                focal_length: focal.clone(),
+                intra_threads: self.ort_threads,
+            };
+            catalog.register(ModelCatalog::entry_from_config(
+                Some(ModelId::new(id.clone())),
+                cfg,
+            ));
+        }
+
+        if primary_id.is_none() {
+            primary_id = catalog.first_available_id();
+        }
+
+        (catalog, primary_id)
     }
 
     /// Builds the initial [`EffectConfig`] selected by these CLI flags.
@@ -437,6 +588,16 @@ fn parse_key_val(raw: &str) -> Result<(String, String), String> {
         return Err("parameter key must not be empty".into());
     }
     Ok((key.to_string(), value.to_string()))
+}
+
+fn parse_model_spec(raw: &str) -> Result<(String, PathBuf), String> {
+    let Some((id, path)) = raw.split_once('=') else {
+        return Err(format!("expected ID=PATH model specification, got '{raw}'"));
+    };
+    if id.is_empty() || path.is_empty() {
+        return Err(format!("invalid model specification '{raw}'"));
+    }
+    Ok((id.to_string(), PathBuf::from(path)))
 }
 
 /// Resolves the Varlink socket path from an explicit option or

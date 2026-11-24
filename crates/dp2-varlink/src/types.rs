@@ -4,9 +4,11 @@
 
 use std::collections::BTreeMap;
 
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dp2_core::{
     Colormap, DepthMapConfig, DepthMapEffect, Dimensions, EffectConfig, EffectDescriptor,
-    EffectError, EffectId, PassthroughEffect, PipelineStatus,
+    EffectError, EffectId, ModelDescriptor, PassthroughEffect, PipelineStatus, PreviewFrame,
+    VideoDeviceDescriptor,
 };
 use serde::{Deserialize, Serialize};
 use zlink::introspect;
@@ -68,7 +70,7 @@ pub struct EffectSettings {
     pub max_depth_meters: Option<f64>,
     /// Optional flag reversing near and far colours.
     pub invert: Option<bool>,
-    /// Optional key-value parameters for custom effects.
+    /// Optional key-value parameters for custom or extended effects.
     pub parameters: Option<BTreeMap<String, String>>,
 }
 
@@ -139,6 +141,82 @@ impl TryFrom<EffectSettings> for EffectConfig {
     }
 }
 
+/// Varlink wire representation of a selectable PipeWire video source or
+/// imported looping video.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, introspect::CustomType)]
+pub struct SourceDeviceInfo {
+    /// PipeWire `node.name` used to target this device.
+    pub name: String,
+    /// Human-readable description shown in menus.
+    pub description: String,
+    /// Whether this device was created from an imported looping video file.
+    pub is_imported_video: bool,
+    /// Backing video file path when `is_imported_video` is `true`.
+    pub video_path: Option<String>,
+}
+
+impl From<VideoDeviceDescriptor> for SourceDeviceInfo {
+    fn from(value: VideoDeviceDescriptor) -> Self {
+        Self {
+            name: value.name,
+            description: value.description,
+            is_imported_video: value.is_imported_video,
+            video_path: value.video_path,
+        }
+    }
+}
+
+/// Varlink wire representation of a Depth Pro 2 [`ModelDescriptor`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, introspect::CustomType)]
+pub struct ModelInfo {
+    /// Machine-readable model identifier.
+    pub id: String,
+    /// Human-readable model name.
+    pub name: String,
+    /// Short summary of speed and capabilities.
+    pub description: String,
+    /// Short parameter-count / size label.
+    pub size_label: String,
+    /// Whether weights are currently present locally.
+    pub available: bool,
+}
+
+impl From<ModelDescriptor> for ModelInfo {
+    fn from(value: ModelDescriptor) -> Self {
+        Self {
+            id: value.id.into(),
+            name: value.name,
+            description: value.description,
+            size_label: value.size_label,
+            available: value.available,
+        }
+    }
+}
+
+/// Varlink wire representation of a downsampled RGBA8 preview frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, introspect::CustomType)]
+pub struct PreviewFrameInfo {
+    /// Preview frame width in pixels.
+    pub width: u32,
+    /// Preview frame height in pixels.
+    pub height: u32,
+    /// Source frame sequence number.
+    pub sequence: u64,
+    /// Base64-encoded packed RGBA8 bytes (`width * height * 4` bytes decoded).
+    pub rgba_base64: String,
+}
+
+impl From<PreviewFrame> for PreviewFrameInfo {
+    fn from(value: PreviewFrame) -> Self {
+        Self {
+            width: value.dimensions.width(),
+            height: value.dimensions.height(),
+            sequence: value.sequence,
+            rgba_base64: BASE64_STANDARD.encode(&value.rgba),
+        }
+    }
+}
+
 /// Varlink wire representation of a [`PipelineStatus`] snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, introspect::CustomType)]
 pub struct StatusSnapshot {
@@ -154,6 +232,8 @@ pub struct StatusSnapshot {
     pub sink_description: String,
     /// Active effect settings.
     pub active_effect: EffectSettings,
+    /// Active Depth Pro 2 model identifier, if known.
+    pub active_model: Option<String>,
     /// Total processed frames.
     pub frames_processed: u64,
     /// Most recent depth inference duration in milliseconds.
@@ -175,6 +255,7 @@ impl From<&PipelineStatus> for StatusSnapshot {
             sink_name: value.sink.name.clone(),
             sink_description: value.sink.description.clone(),
             active_effect: EffectSettings::from(&value.active_effect),
+            active_model: value.active_model.as_ref().map(ToString::to_string),
             frames_processed: value.frames_processed,
             last_inference_ms: value.last_inference_ms,
             last_effect_ms: value.last_effect_ms,
@@ -203,6 +284,44 @@ pub struct EffectsReply {
 pub struct EffectReply {
     /// Active effect settings.
     pub effect: EffectSettings,
+}
+
+/// Reply payload for `ListSources`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, introspect::Type)]
+pub struct SourcesReply {
+    /// Discovered PipeWire video sources and imported looping videos.
+    pub sources: Vec<SourceDeviceInfo>,
+}
+
+/// Reply payload for `SetSource` and `ImportVideo`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, introspect::Type)]
+pub struct SourceReply {
+    /// Selected or imported PipeWire node name.
+    pub name: String,
+    /// Human-readable description of the source.
+    pub description: String,
+}
+
+/// Reply payload for `ListModels`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, introspect::Type)]
+pub struct ModelsReply {
+    /// Configured Depth Pro 2 model variants.
+    pub models: Vec<ModelInfo>,
+}
+
+/// Reply payload for `SetModel`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, introspect::Type)]
+pub struct ModelReply {
+    /// Activated Depth Pro 2 model identifier.
+    pub model: String,
+}
+
+/// Reply payload for `GetPreview`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, introspect::Type)]
+pub struct PreviewReply {
+    /// Downsampled RGBA8 preview frame, or `None` before the first frame is
+    /// produced.
+    pub frame: Option<PreviewFrameInfo>,
 }
 
 /// Reply payload for state-mutating control operations.

@@ -6,21 +6,22 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::Arc,
     thread,
 };
 
 use clap::Parser;
 use dp2_core::{
-    Clock, DepthEstimator, EffectRegistry, Pipeline, PipelineController, PipelineStatus,
-    SystemClock, VideoSink, VideoSource,
+    Clock, DepthEstimator, DynamicDepthEstimator, DynamicVideoSource, EffectRegistry, ModelFactory,
+    Pipeline, PipelineController, PipelineStatus, SourceFactory, SourceInfo, SystemClock,
+    VideoSink, VideoSource,
 };
-use dp2_depth::OnnxDepthPro2Estimator;
-use dp2_pipewire::{PipeWireVideoSink, PipeWireVideoSource};
-use dp2_varlink::{Dp2VarlinkClient, serve_on_socket};
+use dp2_pipewire::{PipeWireSourceManager, PipeWireVideoSink};
+use dp2_varlink::{Dp2VarlinkClient, serve_from_systemd_or_socket};
 use tokio::sync::oneshot;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
-use crate::{AppError, Cli, Command, default_varlink_socket, init_tracing};
+use crate::{AppError, Cli, Command, RunArgs, default_varlink_socket, init_tracing};
 
 /// Entry point invoked by `main`.
 ///
@@ -85,76 +86,170 @@ pub async fn run_command<W: Write>(
     xdg_runtime_dir: Option<&Path>,
     writer: &mut W,
 ) -> Result<(), AppError> {
-    match cli.command {
-        Command::Run(args) => {
-            let socket_path =
-                default_varlink_socket(args.varlink_socket.as_deref(), xdg_runtime_dir)?;
-            let source = PipeWireVideoSource::connect(args.source_config())?;
-            let sink = PipeWireVideoSink::connect(args.sink_config()?)?;
-            let estimator = OnnxDepthPro2Estimator::from_config(&args.depth_config())?;
+    if let Command::Run(args) = cli.command {
+        return run_daemon(&args, xdg_runtime_dir).await;
+    }
 
-            let controller = PipelineController::new(
-                EffectRegistry::with_builtin_effects(),
-                args.initial_effect(),
-                source.info(),
-                sink.info(),
-            )?;
-            let shutdown_controller = controller.clone();
-            let source =
-                source.with_shutdown_check(move || shutdown_controller.is_shutdown_requested());
+    run_control_command(cli.command, xdg_runtime_dir, writer).await
+}
 
-            let status = run_pipeline_with_varlink(
-                source,
-                sink,
-                estimator,
-                SystemClock::new(),
-                controller,
-                &socket_path,
-            )
-            .await?;
+async fn connect_client(
+    socket: Option<&Path>,
+    xdg_runtime_dir: Option<&Path>,
+) -> Result<Dp2VarlinkClient, AppError> {
+    let path = default_varlink_socket(socket, xdg_runtime_dir)?;
+    Ok(Dp2VarlinkClient::connect(&path).await?)
+}
 
-            info!(frames = status.frames_processed, "pipeline stopped cleanly");
+fn command_socket(command: &Command) -> Option<&Path> {
+    match command {
+        Command::Run(args) => args.varlink_socket.as_deref(),
+        Command::Status(args)
+        | Command::ListEffects(args)
+        | Command::GetEffect(args)
+        | Command::ListSources(args)
+        | Command::ListModels(args)
+        | Command::ResetDepth(args)
+        | Command::Shutdown(args) => args.socket.as_deref(),
+        Command::SetEffect { socket, .. }
+        | Command::SetSource { socket, .. }
+        | Command::ImportVideo { socket, .. }
+        | Command::RemoveVideo { socket, .. }
+        | Command::SetModel { socket, .. }
+        | Command::Preview { socket, .. } => socket.socket.as_deref(),
+    }
+}
+
+async fn run_control_command<W: Write>(
+    command: Command,
+    xdg_runtime_dir: Option<&Path>,
+    writer: &mut W,
+) -> Result<(), AppError> {
+    let mut client = connect_client(command_socket(&command), xdg_runtime_dir).await?;
+    match command {
+        Command::Run(_) => unreachable!("handled by run_command"),
+        Command::Status(_) => write_json_line(writer, &client.get_status().await?),
+        Command::ListEffects(_) => write_json_line(writer, &client.list_effects().await?),
+        Command::GetEffect(_) => write_json_line(writer, &client.get_effect().await?),
+        Command::SetEffect { effect, .. } => write_json_line(
+            writer,
+            &client.set_effect(&effect.into_effect_config()).await?,
+        ),
+        Command::ListSources(_) => write_json_line(writer, &client.list_sources().await?),
+        Command::SetSource { name, .. } => {
+            write_json_line(writer, &client.set_source(name.as_deref()).await?)
+        }
+        Command::ImportVideo {
+            path, no_select, ..
+        } => {
+            let imported = client
+                .import_video(&path.to_string_lossy(), !no_select)
+                .await?;
+            write_json_line(writer, &imported)
+        }
+        Command::RemoveVideo { name, .. } => {
+            client.remove_video(&name).await?;
+            writeln!(writer, "{{\"ok\":true}}")?;
             Ok(())
         }
-        Command::Status(args) => {
-            let socket = default_varlink_socket(args.socket.as_deref(), xdg_runtime_dir)?;
-            let mut client = Dp2VarlinkClient::connect(&socket).await?;
-            let status = client.get_status().await?;
-            write_json_line(writer, &status)
+        Command::ListModels(_) => write_json_line(writer, &client.list_models().await?),
+        Command::SetModel { id, .. } => {
+            let applied = client.set_model(&id).await?;
+            write_json_line(writer, &serde_json::json!({ "model": applied }))
         }
-        Command::ListEffects(args) => {
-            let socket = default_varlink_socket(args.socket.as_deref(), xdg_runtime_dir)?;
-            let mut client = Dp2VarlinkClient::connect(&socket).await?;
-            let effects = client.list_effects().await?;
-            write_json_line(writer, &effects)
+        Command::Preview { max_width, .. } => {
+            write_json_line(writer, &client.get_preview(Some(max_width)).await?)
         }
-        Command::GetEffect(args) => {
-            let socket = default_varlink_socket(args.socket.as_deref(), xdg_runtime_dir)?;
-            let mut client = Dp2VarlinkClient::connect(&socket).await?;
-            let effect = client.get_effect().await?;
-            write_json_line(writer, &effect)
-        }
-        Command::SetEffect { socket, effect } => {
-            let socket = default_varlink_socket(socket.socket.as_deref(), xdg_runtime_dir)?;
-            let mut client = Dp2VarlinkClient::connect(&socket).await?;
-            let applied = client.set_effect(&effect.into_effect_config()).await?;
-            write_json_line(writer, &applied)
-        }
-        Command::ResetDepth(args) => {
-            let socket = default_varlink_socket(args.socket.as_deref(), xdg_runtime_dir)?;
-            let mut client = Dp2VarlinkClient::connect(&socket).await?;
+        Command::ResetDepth(_) => {
             client.reset_depth_state().await?;
             writeln!(writer, "{{\"ok\":true}}")?;
             Ok(())
         }
-        Command::Shutdown(args) => {
-            let socket = default_varlink_socket(args.socket.as_deref(), xdg_runtime_dir)?;
-            let mut client = Dp2VarlinkClient::connect(&socket).await?;
+        Command::Shutdown(_) => {
             client.shutdown().await?;
             writeln!(writer, "{{\"ok\":true}}")?;
             Ok(())
         }
     }
+}
+
+async fn run_daemon(args: &RunArgs, xdg_runtime_dir: Option<&Path>) -> Result<(), AppError> {
+    let fallback_socket =
+        default_varlink_socket(args.varlink_socket.as_deref(), xdg_runtime_dir).ok();
+    let sink_cfg = args.sink_config()?;
+    let sink_dims = sink_cfg.dimensions;
+    let sink = PipeWireVideoSink::connect(sink_cfg)?;
+
+    let source_manager = Arc::new(PipeWireSourceManager::new(
+        args.pipewire_remote.clone(),
+        args.sink_name.clone(),
+        sink_dims,
+    ));
+
+    let (catalog, primary_model_id) = args.model_catalog();
+    let model_factory = Arc::new(catalog);
+
+    let initial_estimator = if let Some(ref id) = primary_model_id {
+        Some(model_factory.load_model(id)?)
+    } else {
+        warn!("starting without a loaded Depth Pro 2 model; select one via Varlink");
+        None
+    };
+
+    let initial_source_info = SourceInfo {
+        name: args.source.clone().unwrap_or_else(|| "none".into()),
+        description: args.source.as_ref().map_or_else(
+            || "No video source selected".into(),
+            |name| format!("PipeWire source {name}"),
+        ),
+    };
+
+    let controller = PipelineController::new(
+        EffectRegistry::with_builtin_effects(),
+        args.initial_effect(),
+        initial_source_info,
+        sink.info(),
+    )?;
+    controller.set_source_factory(source_manager.clone());
+    controller.set_model_factory(model_factory);
+    controller.set_stay_alive_when_idle(args.idle || args.source.is_none());
+    if let Some(id) = primary_model_id {
+        controller.set_active_model(id);
+    }
+
+    let initial_source = if args.idle {
+        None
+    } else {
+        let stop_ctrl = controller.clone();
+        let initial_gen = controller.source_generation();
+        let should_stop = Box::new(move || {
+            stop_ctrl.is_shutdown_requested() || stop_ctrl.source_generation() != initial_gen
+        });
+        match source_manager.open_source(args.source.as_deref(), should_stop) {
+            Ok(source) => Some(source),
+            Err(err) if args.source.is_none() => {
+                warn!(error = %err, "no initial PipeWire camera available; waiting for selection");
+                None
+            }
+            Err(err) => return Err(AppError::Pipeline(err.into())),
+        }
+    };
+
+    let source = DynamicVideoSource::new(initial_source, controller.clone());
+    let estimator = DynamicDepthEstimator::new(initial_estimator, controller.clone());
+
+    let status = run_pipeline_with_varlink_opt(
+        source,
+        sink,
+        estimator,
+        SystemClock::new(),
+        controller,
+        fallback_socket.as_deref(),
+    )
+    .await?;
+
+    info!(frames = status.frames_processed, "pipeline stopped cleanly");
+    Ok(())
 }
 
 /// Runs an injected [`Pipeline`] on a dedicated worker thread concurrently with
@@ -214,6 +309,31 @@ where
     D: DepthEstimator + 'static,
     C: Clock + 'static,
 {
+    run_pipeline_with_varlink_opt(
+        source,
+        sink,
+        estimator,
+        clock,
+        controller,
+        Some(varlink_socket),
+    )
+    .await
+}
+
+async fn run_pipeline_with_varlink_opt<S, K, D, C>(
+    source: S,
+    sink: K,
+    estimator: D,
+    clock: C,
+    controller: PipelineController,
+    varlink_socket: Option<&Path>,
+) -> Result<PipelineStatus, AppError>
+where
+    S: VideoSource + 'static,
+    K: VideoSink + 'static,
+    D: DepthEstimator + 'static,
+    C: Clock + 'static,
+{
     let (done_tx, done_rx) = oneshot::channel::<Result<PipelineStatus, dp2_core::PipelineError>>();
     let pipeline_controller = controller.clone();
 
@@ -240,7 +360,8 @@ where
         }
     };
 
-    let server_result = serve_on_socket(varlink_socket, controller, shutdown_signal).await;
+    let server_result =
+        serve_from_systemd_or_socket(varlink_socket, controller, shutdown_signal).await;
 
     let status = if let Some(res) = pipeline_result {
         res?
