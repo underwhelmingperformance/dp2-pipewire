@@ -5,7 +5,8 @@
 //! Deterministic test doubles for `dp2-core` traits.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
+    path::Path,
     sync::{
         Mutex,
         atomic::{AtomicU64, Ordering},
@@ -14,8 +15,9 @@ use std::{
 };
 
 use crate::{
-    Clock, DepthError, DepthEstimator, DepthMap, PipelineStatus, SinkError, SinkInfo, SourceError,
-    SourceInfo, StateObserver, VideoFrame, VideoSink, VideoSource,
+    Clock, DepthError, DepthEstimator, DepthMap, ModelDescriptor, ModelFactory, ModelId,
+    PipelineStatus, SinkError, SinkInfo, SourceError, SourceFactory, SourceInfo, StateObserver,
+    VideoDeviceDescriptor, VideoFrame, VideoSink, VideoSource,
 };
 
 /// In-memory [`VideoSource`] that yields pre-scripted frames or errors.
@@ -462,5 +464,249 @@ impl StateObserver for SpyObserver {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(status.clone());
+    }
+}
+
+struct RegisteredSource {
+    descriptor: VideoDeviceDescriptor,
+    frames: Vec<VideoFrame>,
+}
+
+/// Deterministic in-memory [`SourceFactory`] for testing runtime source
+/// switching and video import without PipeWire.
+#[derive(Default)]
+pub struct FakeSourceFactory {
+    sources: Mutex<BTreeMap<String, RegisteredSource>>,
+}
+
+impl FakeSourceFactory {
+    /// Creates an empty fake source factory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use dp2_core::{SourceFactory, testing::FakeSourceFactory};
+    ///
+    /// let factory = FakeSourceFactory::new();
+    /// assert!(factory.list_sources()?.is_empty());
+    /// # Ok::<(), dp2_core::SourceError>(())
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers a fake camera source yielding `frames`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use dp2_core::{SourceFactory, testing::FakeSourceFactory};
+    ///
+    /// let factory = FakeSourceFactory::new();
+    /// factory.register_frames("cam0", "Test Camera", vec![]);
+    /// assert_eq!(factory.list_sources()?.len(), 1);
+    /// # Ok::<(), dp2_core::SourceError>(())
+    /// ```
+    pub fn register_frames(
+        &self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        frames: Vec<VideoFrame>,
+    ) {
+        let name = name.into();
+        let descriptor = VideoDeviceDescriptor {
+            name: name.clone(),
+            description: description.into(),
+            is_imported_video: false,
+            video_path: None,
+        };
+        self.sources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(name, RegisteredSource { descriptor, frames });
+    }
+
+    /// Registers a fake camera source that immediately reaches end-of-stream.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use dp2_core::{SourceFactory, testing::FakeSourceFactory};
+    ///
+    /// let factory = FakeSourceFactory::new();
+    /// factory.register_empty("cam1", "Empty Camera");
+    /// assert_eq!(factory.list_sources()?.len(), 1);
+    /// # Ok::<(), dp2_core::SourceError>(())
+    /// ```
+    pub fn register_empty(&self, name: impl Into<String>, description: impl Into<String>) {
+        self.register_frames(name, description, Vec::new());
+    }
+}
+
+impl SourceFactory for FakeSourceFactory {
+    fn list_sources(&self) -> Result<Vec<VideoDeviceDescriptor>, SourceError> {
+        Ok(self
+            .sources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(|entry| entry.descriptor.clone())
+            .collect())
+    }
+
+    fn open_source(
+        &self,
+        target: Option<&str>,
+        _should_stop: Box<dyn Fn() -> bool + Send>,
+    ) -> Result<Box<dyn VideoSource>, SourceError> {
+        let guard = self
+            .sources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = match target {
+            Some(name) => guard
+                .get(name)
+                .ok_or_else(|| SourceError::Backend(format!("unknown source '{name}'")))?,
+            None => guard
+                .values()
+                .next()
+                .ok_or_else(|| SourceError::Backend("no fake sources registered".into()))?,
+        };
+        Ok(Box::new(FakeVideoSource::from_frames(
+            entry.descriptor.name.clone(),
+            entry.descriptor.description.clone(),
+            entry.frames.clone(),
+        )))
+    }
+
+    fn import_video(&self, path: &Path) -> Result<VideoDeviceDescriptor, SourceError> {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("video");
+        let name = format!("dp2-video-{stem}");
+        let descriptor = VideoDeviceDescriptor {
+            name: name.clone(),
+            description: format!("Video: {stem}"),
+            is_imported_video: true,
+            video_path: Some(path.display().to_string()),
+        };
+        self.sources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                name,
+                RegisteredSource {
+                    descriptor: descriptor.clone(),
+                    frames: Vec::new(),
+                },
+            );
+        Ok(descriptor)
+    }
+
+    fn remove_video(&self, name: &str) -> Result<(), SourceError> {
+        let mut guard = self
+            .sources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match guard.get(name) {
+            Some(entry) if entry.descriptor.is_imported_video => {
+                guard.remove(name);
+                Ok(())
+            }
+            _ => Err(SourceError::Backend(format!(
+                "no imported video named '{name}'"
+            ))),
+        }
+    }
+}
+
+struct RegisteredModel {
+    descriptor: ModelDescriptor,
+    depth_meters: f32,
+}
+
+/// Deterministic in-memory [`ModelFactory`] for testing runtime model
+/// hot-swapping without ONNX weights.
+#[derive(Default)]
+pub struct FakeModelFactory {
+    models: Mutex<BTreeMap<ModelId, RegisteredModel>>,
+}
+
+impl FakeModelFactory {
+    /// Creates an empty fake model factory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use dp2_core::{ModelFactory, testing::FakeModelFactory};
+    ///
+    /// let factory = FakeModelFactory::new();
+    /// assert!(factory.list_models().is_empty());
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers a fake model returning a constant metric depth.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use dp2_core::{ModelFactory, testing::FakeModelFactory};
+    ///
+    /// let factory = FakeModelFactory::new();
+    /// factory.register_constant("s", "Depth Pro 2 S", "S (24M)", 2.0);
+    /// assert_eq!(factory.list_models().len(), 1);
+    /// ```
+    pub fn register_constant(
+        &self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        size_label: impl Into<String>,
+        depth_meters: f32,
+    ) {
+        let model_id = ModelId::new(id);
+        let descriptor = ModelDescriptor {
+            id: model_id.clone(),
+            name: name.into(),
+            description: "Deterministic fake depth model".into(),
+            size_label: size_label.into(),
+            available: true,
+        };
+        self.models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                model_id,
+                RegisteredModel {
+                    descriptor,
+                    depth_meters,
+                },
+            );
+    }
+}
+
+impl ModelFactory for FakeModelFactory {
+    fn list_models(&self) -> Vec<ModelDescriptor> {
+        self.models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(|entry| entry.descriptor.clone())
+            .collect()
+    }
+
+    fn load_model(&self, id: &ModelId) -> Result<Box<dyn DepthEstimator>, DepthError> {
+        let guard = self
+            .models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = guard
+            .get(id)
+            .ok_or_else(|| DepthError::Inference(format!("unknown model '{id}'")))?;
+        Ok(Box::new(FakeDepthEstimator::constant(
+            entry.depth_meters,
+            500.0,
+        )))
     }
 }
