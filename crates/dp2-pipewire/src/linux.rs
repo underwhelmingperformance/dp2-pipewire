@@ -49,6 +49,7 @@ pub struct PipeWireVideoSource {
     info: SourceInfo,
     frames_rx: Receiver<Result<VideoFrame, PipeWireError>>,
     cmd_tx: pw::channel::Sender<SourceCmd>,
+    shutdown_check: Option<Box<dyn Fn() -> bool + Send>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -102,8 +103,61 @@ impl PipeWireVideoSource {
             info,
             frames_rx,
             cmd_tx,
+            shutdown_check: None,
             worker: Some(worker),
         })
+    }
+
+    /// Attaches a shutdown predicate polled while waiting for incoming frames
+    /// so [`VideoSource::next_frame`] returns `Ok(None)` promptly on
+    /// shutdown.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use dp2_pipewire::{PipeWireSourceConfig, PipeWireVideoSource};
+    ///
+    /// let _source = PipeWireVideoSource::connect(PipeWireSourceConfig::new(None))?
+    ///     .with_shutdown_check(|| false);
+    /// # Ok::<(), dp2_pipewire::PipeWireError>(())
+    /// ```
+    #[must_use]
+    pub fn with_shutdown_check(mut self, check: impl Fn() -> bool + Send + 'static) -> Self {
+        self.shutdown_check = Some(Box::new(check));
+        self
+    }
+
+    /// Attempts to receive the next frame within `timeout`, returning
+    /// `Ok(None)` if no frame arrives before the deadline or the stream
+    /// disconnects.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceError`] if frame decoding failed.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    ///
+    /// use dp2_pipewire::{PipeWireSourceConfig, PipeWireVideoSource};
+    ///
+    /// let mut source = PipeWireVideoSource::connect(PipeWireSourceConfig::new(None))?;
+    /// let _frame = source.recv_frame_timeout(Duration::from_secs(1))?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn recv_frame_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<VideoFrame>, SourceError> {
+        match self.frames_rx.recv_timeout(timeout) {
+            Ok(Ok(frame)) => Ok(Some(frame)),
+            Ok(Err(err)) => Err(err.into()),
+            Err(
+                crossbeam_channel::RecvTimeoutError::Timeout
+                | crossbeam_channel::RecvTimeoutError::Disconnected,
+            ) => Ok(None),
+        }
     }
 }
 
@@ -113,10 +167,19 @@ impl VideoSource for PipeWireVideoSource {
     }
 
     fn next_frame(&mut self) -> Result<Option<VideoFrame>, SourceError> {
-        match self.frames_rx.recv() {
-            Ok(Ok(frame)) => Ok(Some(frame)),
-            Ok(Err(err)) => Err(err.into()),
-            Err(_) => Ok(None),
+        loop {
+            if self.shutdown_check.as_ref().is_some_and(|check| check()) {
+                return Ok(None);
+            }
+            match self
+                .frames_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+            {
+                Ok(Ok(frame)) => return Ok(Some(frame)),
+                Ok(Err(err)) => return Err(err.into()),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return Ok(None),
+            }
         }
     }
 }
@@ -428,9 +491,17 @@ fn run_sink_loop_inner(
         .add_local_listener_with_user_data(())
         .state_changed({
             let shared = shared_cb.clone();
-            move |_, (), old, new| {
+            move |stream, (), old, new| {
                 debug!(?old, ?new, "PipeWire virtual camera stream state changed");
-                shared.borrow_mut().streaming = matches!(new, pw::stream::StreamState::Streaming);
+                let is_streaming = matches!(new, pw::stream::StreamState::Streaming);
+                let has_frame = {
+                    let mut st = shared.borrow_mut();
+                    st.streaming = is_streaming;
+                    st.latest_frame.is_some()
+                };
+                if is_streaming && has_frame {
+                    let _ = stream.trigger_process();
+                }
             }
         })
         .param_changed({

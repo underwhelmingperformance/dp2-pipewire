@@ -23,10 +23,10 @@ orb -m "${VM_NAME}" bash -lc "
   export CARGO_TARGET_DIR='${TARGET_DIR}'
   export DP2_MODEL_PATH='${MODEL_PATH}'
   export DP2_TEST_VIDEO='${VIDEO_PATH}'
-  export ORT_DYLIB_PATH=\"\$(ldconfig -p | awk '/libonnxruntime\\.so/ {print \$NF; exit}')\"
+  export ORT_DYLIB_PATH='/opt/dp2-ort/libonnxruntime.so.1.32.0'
   echo \"Using ORT_DYLIB_PATH=\${ORT_DYLIB_PATH}\"
 
   cargo clippy --locked --workspace --all-targets -- --deny warnings
   cargo test --locked --workspace
-  cargo test --locked -p dp2 --test pipewire_integration -- --ignored --nocapture --test-threads=1
+  cargo test --locked -p dp2 --test pipewire_integration -- --ignored --test-threads=1
 "

@@ -99,6 +99,9 @@ pub async fn run_command<W: Write>(
                 source.info(),
                 sink.info(),
             )?;
+            let shutdown_controller = controller.clone();
+            let source =
+                source.with_shutdown_check(move || shutdown_controller.is_shutdown_requested());
 
             let status = run_pipeline_with_varlink(
                 source,

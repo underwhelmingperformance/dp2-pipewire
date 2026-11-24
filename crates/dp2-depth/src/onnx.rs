@@ -476,8 +476,10 @@ fn build_session(
 ) -> Result<Session, DepthError> {
     let mut builder = Session::builder(env)
         .map_err(|e| DepthError::Inference(format!("failed to create session builder: {e}")))?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| DepthError::Inference(format!("failed to set optimisation level: {e}")))?;
+        .with_optimization_level(GraphOptimizationLevel::All)
+        .map_err(|e| DepthError::Inference(format!("failed to set optimisation level: {e}")))?
+        .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(true).build()])
+        .map_err(|e| DepthError::Inference(format!("failed to configure CPU provider: {e}")))?;
 
     if let Some(threads) = intra_threads {
         builder = builder

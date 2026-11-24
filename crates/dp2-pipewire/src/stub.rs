@@ -31,6 +31,45 @@ impl PipeWireVideoSource {
     pub fn connect(_config: PipeWireSourceConfig) -> Result<Self, PipeWireError> {
         Err(PipeWireError::UnsupportedPlatform)
     }
+
+    /// Attaches a shutdown predicate (no-op on non-Linux targets).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use dp2_pipewire::{PipeWireError, PipeWireSourceConfig, PipeWireVideoSource};
+    ///
+    /// let result = PipeWireVideoSource::connect(PipeWireSourceConfig::new(None))
+    ///     .map(|src| src.with_shutdown_check(|| true));
+    /// assert!(matches!(result, Err(PipeWireError::UnsupportedPlatform)));
+    /// ```
+    #[must_use]
+    pub fn with_shutdown_check(self, _check: impl Fn() -> bool + Send + 'static) -> Self {
+        self
+    }
+
+    /// Returns [`PipeWireError::UnsupportedPlatform`] on non-Linux targets.
+    ///
+    /// # Errors
+    ///
+    /// Always returns an unsupported-platform error on non-Linux targets.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use dp2_pipewire::{PipeWireError, PipeWireSourceConfig, PipeWireVideoSource};
+    ///
+    /// let result = PipeWireVideoSource::connect(PipeWireSourceConfig::new(None));
+    /// assert!(matches!(result, Err(PipeWireError::UnsupportedPlatform)));
+    /// ```
+    pub fn recv_frame_timeout(
+        &mut self,
+        _timeout: std::time::Duration,
+    ) -> Result<Option<VideoFrame>, SourceError> {
+        Err(PipeWireError::UnsupportedPlatform.into())
+    }
 }
 
 impl VideoSource for PipeWireVideoSource {
