@@ -2,7 +2,10 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use dp2_core::{SinkError, SinkInfo, SourceError, SourceInfo, VideoFrame, VideoSink, VideoSource};
+use dp2_core::{
+    SinkError, SinkInfo, SourceError, SourceInfo, VideoDeviceDescriptor, VideoFrame, VideoSink,
+    VideoSource,
+};
 
 use crate::{PipeWireError, PipeWireSinkConfig, PipeWireSourceConfig};
 
@@ -120,4 +123,25 @@ impl VideoSink for PipeWireVideoSink {
     fn publish_frame(&mut self, _frame: &VideoFrame) -> Result<(), SinkError> {
         Err(PipeWireError::UnsupportedPlatform.into())
     }
+}
+
+/// Returns an empty device list on non-Linux targets.
+///
+/// # Errors
+///
+/// Never returns an error on non-Linux targets.
+///
+/// # Examples
+///
+/// ```
+/// use dp2_pipewire::list_pipewire_video_sources;
+///
+/// assert!(list_pipewire_video_sources(None, "dp2-depth")?.is_empty());
+/// # Ok::<(), dp2_pipewire::PipeWireError>(())
+/// ```
+pub fn list_pipewire_video_sources(
+    _remote_name: Option<&str>,
+    _exclude_node_name: &str,
+) -> Result<Vec<VideoDeviceDescriptor>, PipeWireError> {
+    Ok(Vec::new())
 }

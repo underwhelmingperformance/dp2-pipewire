@@ -5,10 +5,12 @@
 //! Depth Pro 2 ONNX Runtime inference adapter implementing
 //! [`dp2_core::DepthEstimator`].
 
+mod catalog;
 mod config;
 mod onnx;
 mod preprocess;
 
+pub use catalog::{ModelCatalog, ModelEntry};
 pub use config::{DepthPro2Config, FocalLengthPolicy, default_ort_dylib_name};
 pub use onnx::{GraphSpec, OnnxDepthPro2Estimator, StateDtype, StateTensorSpec};
 pub use preprocess::{

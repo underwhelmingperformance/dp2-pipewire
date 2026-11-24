@@ -13,8 +13,8 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 use dp2_core::{
-    Dimensions, PixelFormat, SinkError, SinkInfo, SourceError, SourceInfo, VideoFrame, VideoSink,
-    VideoSource,
+    Dimensions, PixelFormat, SinkError, SinkInfo, SourceError, SourceInfo, VideoDeviceDescriptor,
+    VideoFrame, VideoSink, VideoSource,
 };
 use pipewire as pw;
 use pw::{properties::PropertiesBox, spa};
@@ -830,4 +830,114 @@ const fn pixel_format_to_pw(format: PixelFormat) -> VideoFormat {
         PixelFormat::Rgb8 => VideoFormat::RGB,
         PixelFormat::Bgr8 => VideoFormat::BGR,
     }
+}
+
+/// Queries the PipeWire registry for all available `Video/Source` nodes,
+/// excluding `exclude_node_name` so `dp2` does not list its own virtual camera.
+///
+/// # Errors
+///
+/// Returns [`PipeWireError`] if connecting to PipeWire fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use dp2_pipewire::list_pipewire_video_sources;
+///
+/// let _devices = list_pipewire_video_sources(None, "dp2-depth")?;
+/// # Ok::<(), dp2_pipewire::PipeWireError>(())
+/// ```
+pub fn list_pipewire_video_sources(
+    remote_name: Option<&str>,
+    exclude_node_name: &str,
+) -> Result<Vec<VideoDeviceDescriptor>, PipeWireError> {
+    let remote = remote_name.map(ToOwned::to_owned);
+    let exclude = exclude_node_name.to_owned();
+
+    let handle = thread::Builder::new()
+        .name("dp2-pw-list".into())
+        .spawn(move || list_sources_on_thread(remote.as_deref(), &exclude))
+        .map_err(|e| PipeWireError::Stream(format!("failed to spawn PipeWire list thread: {e}")))?;
+
+    handle
+        .join()
+        .map_err(|_| PipeWireError::WorkerDisconnected)?
+}
+
+fn list_sources_on_thread(
+    remote_name: Option<&str>,
+    exclude_node_name: &str,
+) -> Result<Vec<VideoDeviceDescriptor>, PipeWireError> {
+    pw::init();
+
+    let mainloop =
+        pw::main_loop::MainLoopRc::new(None).map_err(|e| PipeWireError::Connect(e.to_string()))?;
+    let context = pw::context::ContextRc::new(&mainloop, None)
+        .map_err(|e| PipeWireError::Connect(e.to_string()))?;
+    let core = connect_core(&context, remote_name)?;
+    let registry = core
+        .get_registry()
+        .map_err(|e| PipeWireError::Connect(e.to_string()))?;
+
+    let done = std::rc::Rc::new(std::cell::Cell::new(false));
+    let devices = std::rc::Rc::new(std::cell::RefCell::new(Vec::<VideoDeviceDescriptor>::new()));
+
+    let pending = core
+        .sync(0)
+        .map_err(|e| PipeWireError::Connect(e.to_string()))?;
+
+    let done_cb = done.clone();
+    let loop_cb = mainloop.clone();
+    let _core_listener = core
+        .add_listener_local()
+        .done(move |id, seq| {
+            if id == pw::core::PW_ID_CORE && seq == pending {
+                done_cb.set(true);
+                loop_cb.quit();
+            }
+        })
+        .register();
+
+    let devices_cb = devices.clone();
+    let exclude = exclude_node_name.to_owned();
+    let _reg_listener = registry
+        .add_listener_local()
+        .global(move |global| {
+            if global.type_ != pw::types::ObjectType::Node {
+                return;
+            }
+            let Some(props) = global.props else {
+                return;
+            };
+            let Some(media_class) = props.get(*pw::keys::MEDIA_CLASS) else {
+                return;
+            };
+            if !media_class.starts_with("Video/Source") {
+                return;
+            }
+            let Some(name) = props.get(*pw::keys::NODE_NAME) else {
+                return;
+            };
+            if name == exclude {
+                return;
+            }
+            let description = props
+                .get(*pw::keys::NODE_DESCRIPTION)
+                .or_else(|| props.get(*pw::keys::NODE_NICK))
+                .unwrap_or(name);
+            devices_cb.borrow_mut().push(VideoDeviceDescriptor {
+                name: name.to_owned(),
+                description: description.to_owned(),
+                is_imported_video: false,
+                video_path: None,
+            });
+        })
+        .register();
+
+    while !done.get() {
+        mainloop.run();
+    }
+
+    let result = devices.borrow().clone();
+    Ok(result)
 }
