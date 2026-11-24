@@ -1,0 +1,8 @@
+{
+  "uuid": "dp2@orangesquash.org.uk",
+  "name": "Depth Pro 2 Camera",
+  "description": "Control Depth Pro 2 PipeWire virtual camera effects, models, sources, and inline live preview from the top bar",
+  "shell-version": ["47", "48", "49", "50"],
+  "version": 1,
+  "url": "https://github.com/underwhelmingperformance/dp2"
+}

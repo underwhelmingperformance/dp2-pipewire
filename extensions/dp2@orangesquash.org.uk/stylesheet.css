@@ -1,0 +1,82 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Iain Lane <iain@orangesquash.org.uk>
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+.dp2-panel-box {
+  spacing: 4px;
+}
+
+.dp2-panel-label {
+  font-size: 0.85em;
+  font-weight: 700;
+}
+
+.dp2-preview-item {
+  padding: 8px 12px;
+}
+
+.dp2-preview-box {
+  spacing: 6px;
+}
+
+.dp2-preview-frame {
+  background-color: rgba(18, 20, 24, 0.92);
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.dp2-preview-placeholder {
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 0.9em;
+}
+
+.dp2-preview-caption {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.82em;
+}
+
+.dp2-section-header {
+  font-weight: 700;
+  font-size: 0.85em;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.dp2-chip-item {
+  padding: 4px 14px 8px 14px;
+}
+
+.dp2-chip-container {
+  spacing: 4px;
+}
+
+.dp2-chip-title {
+  font-size: 0.8em;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.dp2-chip-row {
+  spacing: 4px;
+}
+
+.dp2-chip-button {
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 0.82em;
+  background-color: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.dp2-chip-button:hover {
+  background-color: rgba(255, 255, 255, 0.16);
+}
+
+.dp2-chip-active {
+  background-color: #3584e4;
+  font-weight: 700;
+}
+
+.dp2-chip-active:hover {
+  background-color: #4a95ee;
+}

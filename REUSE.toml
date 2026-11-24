@@ -1,6 +1,11 @@
 version = 1
 
 [[annotations]]
+path = "extensions/dp2@orangesquash.org.uk/metadata.json"
+SPDX-FileCopyrightText = "2026 Iain Lane <iain@orangesquash.org.uk>"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
+[[annotations]]
 path = [
   "Cargo.lock",
   "flake.lock",
