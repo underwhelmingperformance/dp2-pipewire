@@ -22,7 +22,7 @@ publish = false
 
 [workspace.dependencies]
 assert_matches = "1.5.0"
-base64 = "0.22.1"
+base64 = "0.23.0"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 crossbeam-channel = "0.5.15"
 derive_more = { version = "2.1.1", features = ["display", "from", "into"] }
@@ -44,7 +44,7 @@ ort = { version = "2.0.0-rc.15", default-features = false, features = [
 ] }
 pipewire = { version = "0.10.1", features = ["v1_0_0"] }
 pretty_assertions = "1.4.1"
-rstest = "0.27.0"
+rstest = "0.29.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.149"
 tempfile = "3.27.0"
